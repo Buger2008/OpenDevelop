@@ -97,7 +97,19 @@ $progpudrawingPkgId = 'ProGPU.System.Drawing.Common'
 $transportPkgId = 'LibreWPF.Transport'
 $interopPkgId = 'LibreWPF.Interop'
 
-$sysformsVersion = Find-PackageVersion $NugetPackageRoot $sysformsPkgId.ToLowerInvariant()
+$deps = Get-Content -Raw -Path $DepsPath | ConvertFrom-Json -AsHashtable
+
+# Prefer the version the build actually resolved (recorded in deps.json) over the newest folder in
+# the global package cache: a stale older version whose folder mtime got bumped would otherwise be
+# copied over the correct assembly (e.g. preview.45's v0.1.0.0 WindowsFormsIntegration.dll replacing
+# preview.57's v11.0.0.0 one), failing ProGpuWpfSdkPortableBootstrap with FileNotFoundException.
+function Resolve-PackageVersion([string]$packageId) {
+    $version = Find-DependencyVersion $deps $packageId
+    if ($version -and (Test-Path (Join-Path $NugetPackageRoot "$($packageId.ToLowerInvariant())/$version"))) { return $version }
+    return Find-PackageVersion $NugetPackageRoot $packageId.ToLowerInvariant()
+}
+
+$sysformsVersion = Resolve-PackageVersion $sysformsPkgId
 if (-not $sysformsVersion) {
     Write-Host "patch-librewinforms-deps.ps1: $sysformsPkgId not found under $NugetPackageRoot, skipping"
     return
@@ -105,12 +117,10 @@ if (-not $sysformsVersion) {
 
 # WindowsFormsIntegration is optional - not every project that pulls in System.Windows.Forms
 # also uses WindowsFormsHost. Only add its entry when the package is actually installed.
-$winintVersion = Find-PackageVersion $NugetPackageRoot $winintPkgId.ToLowerInvariant()
-$progpudrawingVersion = Find-PackageVersion $NugetPackageRoot $progpudrawingPkgId.ToLowerInvariant()
-$transportVersion = Find-PackageVersion $NugetPackageRoot $transportPkgId.ToLowerInvariant()
-$interopVersion = Find-PackageVersion $NugetPackageRoot $interopPkgId.ToLowerInvariant()
-
-$deps = Get-Content -Raw -Path $DepsPath | ConvertFrom-Json -AsHashtable
+$winintVersion = Resolve-PackageVersion $winintPkgId
+$progpudrawingVersion = Resolve-PackageVersion $progpudrawingPkgId
+$transportVersion = Resolve-PackageVersion $transportPkgId
+$interopVersion = Resolve-PackageVersion $interopPkgId
 
 $sysformsKey = "$sysformsPkgId/$sysformsVersion"
 $winintKey = if ($winintVersion) { "$winintPkgId/$winintVersion" } else { $null }
@@ -313,7 +323,7 @@ $portableProGpuPackageIds = @(
 )
 foreach ($packageId in $portableProGpuPackageIds) {
     $packageIdLower = $packageId.ToLowerInvariant()
-    $packageVersion = Find-PackageVersion $NugetPackageRoot $packageIdLower
+    $packageVersion = Resolve-PackageVersion $packageId
     if (-not $packageVersion) { continue }
 
     $runtimeDir = Join-Path $NugetPackageRoot "$packageIdLower/$packageVersion/lib/net10.0"

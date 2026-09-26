@@ -112,11 +112,12 @@ echo "Creating writable DMG: $rw_dmg"
 # mid-build. Detach any stale mount and retry before surfacing the real error.
 create_ok=0
 for attempt in 1 2 3; do
-  if hdiutil create -volname "$volume_name" -srcfolder "$stage_dir" -ov -format UDRW "$rw_dmg" >/dev/null 2>&1; then
+  if create_err="$(hdiutil create -volname "$volume_name" -srcfolder "$stage_dir" -ov -format UDRW "$rw_dmg" 2>&1 >/dev/null)"; then
     create_ok=1
     break
   fi
   echo "hdiutil create failed (attempt $attempt/3), detaching stale mounts and retrying…"
+  grep -v 'is deprecated' <<< "$create_err" | sed 's/^/  hdiutil: /' || true
   hdiutil detach "/Volumes/$volume_name" -quiet >/dev/null 2>&1 || true
   sleep 3
 done
@@ -181,13 +182,23 @@ EOF
   fi
 fi
 
-for _ in {1..6}; do
+# Finder can keep the volume busy for a few seconds after the layout script closes its window.
+for _ in {1..10}; do
   if hdiutil detach "$detach_device" -quiet >/dev/null 2>&1; then
     detach_device=""
     break
   fi
   sleep 1
 done
+
+if [[ -n "$detach_device" ]]; then
+  echo "Detach still busy; forcing: $detach_device"
+  if detach_err="$(hdiutil detach "$detach_device" -force 2>&1)"; then
+    detach_device=""
+  else
+    echo "$detach_err"
+  fi
+fi
 
 if [[ -n "$detach_device" ]]; then
   echo "Failed to detach DMG device: $detach_device"

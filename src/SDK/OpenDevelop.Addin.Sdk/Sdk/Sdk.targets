@@ -100,6 +100,14 @@
         Condition="$([System.String]::Copy('%(FullPath)').ToLowerInvariant().Contains('/librewpf.transport/')) And $([System.String]::Copy('%(FullPath)').Contains('/ref/'))" />
       <_OpenDevelopPortableWpfRuntime Include="$([System.String]::Copy('%(_OpenDevelopPortableWpfReference.FullPath)').Replace('/ref/', '/lib/'))"
         Condition="Exists('%(Identity)')" />
+      <!-- dist.ps1 builds AddIns with ProGpuWpfCopyPackageRuntimeAssets=false because in-process
+           AddIns share the IDE's copy. A child host has no such parent directory to fall back
+           to, so restore the ProGPU.* / LibreWPF.Interop implementations it references too;
+           without them the portable bootstrap dies with FileNotFoundException for
+           ProGPU.Wpf.Interop before JSON-RPC connects. -->
+      <_OpenDevelopProGpuReference Include="@(ReferencePath)"
+        Condition="($([System.String]::Copy('%(FullPath)').ToLowerInvariant().Replace('\','/').Contains('/progpu.')) Or $([System.String]::Copy('%(FullPath)').ToLowerInvariant().Replace('\','/').Contains('/librewpf.interop/'))) And $([System.String]::Copy('%(FullPath)').Replace('\','/').Contains('/lib/'))" />
+      <_OpenDevelopPortableWpfRuntime Include="@(_OpenDevelopProGpuReference)" Condition="Exists('%(Identity)')" />
     </ItemGroup>
     <Copy SourceFiles="@(_OpenDevelopPortableWpfRuntime)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <Message Importance="normal" Text="OpenDevelop Addin SDK: restored @(_OpenDevelopPortableWpfRuntime->Count()) portable WPF runtime assemblies for $(MSBuildProjectName)." Condition="@(_OpenDevelopPortableWpfRuntime->Count()) &gt; 0" />

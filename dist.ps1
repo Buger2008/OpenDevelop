@@ -425,6 +425,16 @@ function Invoke-MacPayload {
     $env:DIST_CONFIG = $config
     & bash (Join-Path $repoRoot 'build/macos/build-application-bundle.sh')
     if ($LASTEXITCODE -ne 0) { throw "build-application-bundle.sh exited with code $LASTEXITCODE" }
+
+    # Same as the Windows payload: out-of-process hosts resolve only from their own deps.json,
+    # which declares some packages (System.Windows.Extensions, ...) only under runtimes/win.
+    # Without the patch the host cannot load them on macOS even though the file is present.
+    $bundleAddIns = Join-Path $repoRoot 'OpenDevelop.app/Contents/MacOS/AddIns'
+    Get-ChildItem -LiteralPath $bundleAddIns -Recurse -File -Filter '*.deps.json' | Where-Object {
+        Test-Path -LiteralPath ($_.FullName -replace '\.deps\.json$', '.runtimeconfig.json')
+    } | ForEach-Object {
+        & $patchScript $_.FullName (Get-NuGetGlobalPackages)
+    }
     return (Join-Path $repoRoot 'OpenDevelop.app')
 }
 
