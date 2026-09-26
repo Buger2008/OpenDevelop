@@ -149,12 +149,11 @@ namespace ICSharpCode.SharpDevelop.Workbench
 
 		/// <summary>
 		/// Whether the secondary view is shown side by side with the primary instead of as a tab.
-		/// Spike switch: set <c>OD_XAML_SPLIT=1</c> in the environment, or toggle live with the
-		/// DevFlow action <c>od.editor.toggle-split</c>. Off by default: the save authority and
-		/// live edit sync are not yet split-aware, so this is for evaluating the layout only.
+		/// Enabled by default. Set <c>OD_XAML_SPLIT=0</c> to opt out temporarily, or toggle live
+		/// with the DevFlow action <c>od.editor.toggle-split</c>.
 		/// </summary>
 		public static bool SplitViewEnabled { get; set; } =
-			Environment.GetEnvironmentVariable("OD_XAML_SPLIT") == "1";
+			Environment.GetEnvironmentVariable("OD_XAML_SPLIT") != "0";
 
 		/// <summary>Turns the side-by-side layout on/off for this window (needs two views).</summary>
 		public void SetSplitView(bool enabled)
