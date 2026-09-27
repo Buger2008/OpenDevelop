@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Diagnostics;
+using System.Xml.Linq;
 
 using Xunit;
 
@@ -12,6 +14,89 @@ public sealed class DebuggerIntegrationTests
     public DebuggerIntegrationTests(OpenDevelopAppFixture app)
     {
         _app = app;
+    }
+
+    [Fact]
+    public async Task ClassLibrary_DebugOptionsLaunchExternalHostAndHitLibraryBreakpoint()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "opendevelop-library-debug-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var projectPath = Path.Combine(directory, "LibraryUnderTest.csproj");
+        var librarySource = Path.Combine(directory, "LibraryCode.cs");
+        var hostDirectory = Path.Combine(directory, "HostApp");
+        Directory.CreateDirectory(hostDirectory);
+        var hostProjectPath = Path.Combine(hostDirectory, "HostApp.csproj");
+        File.WriteAllText(projectPath, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Library</OutputType><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup><ItemGroup><Compile Include=\"LibraryCode.cs\" /></ItemGroup></Project>");
+        File.WriteAllText(librarySource, "public static class LibraryCode\n{\n    public static string Run()\n    {\n        var result = \"library hit\";\n        return result;\n    }\n}\n");
+        File.WriteAllText(hostProjectPath, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup><ItemGroup><Compile Include=\"Program.cs\" /><ProjectReference Include=\"../LibraryUnderTest.csproj\" /></ItemGroup></Project>");
+        File.WriteAllText(Path.Combine(hostDirectory, "Program.cs"), "System.Console.WriteLine(LibraryCode.Run());");
+        try
+        {
+            using (var build = Process.Start(new ProcessStartInfo("dotnet") {
+                ArgumentList = { "build", hostProjectPath, "-c", "Debug", "--nologo" },
+                WorkingDirectory = directory,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            })!)
+            {
+                var output = await build.StandardOutput.ReadToEndAsync();
+                var error = await build.StandardError.ReadToEndAsync();
+                await build.WaitForExitAsync();
+                Assert.True(build.ExitCode == 0, output + error);
+            }
+            var hostOutput = Path.Combine(hostDirectory, "bin", "Debug", "net10.0");
+            var hostDll = Path.Combine(hostOutput, "HostApp.dll");
+            Assert.True(File.Exists(hostDll));
+
+            var opened = await _app.ReopenSolutionAsync(projectPath);
+            Assert.True(opened.GetProperty("success").GetBoolean(), opened.ToString());
+            var selected = await _app.InvokeAsync("od.project-browser.select", "Project", "LibraryUnderTest");
+            Assert.True(selected.GetProperty("success").GetBoolean(), selected.ToString());
+
+            var result = await _app.InvokeAsync("od.project-browser.open-selected");
+            Assert.True(result.GetProperty("projectOptionsOpen").GetBoolean(), result.ToString());
+            Assert.Equal("LibraryUnderTest", result.GetProperty("projectName").GetString());
+            Assert.Contains(result.GetProperty("tabs").EnumerateArray(), tab =>
+                tab.GetString()?.Contains("Debug", StringComparison.OrdinalIgnoreCase) == true);
+
+            var configured = await _app.InvokeAsync("od.project-options.configure-debug-host", hostDll, hostOutput);
+            Assert.True(configured.GetProperty("success").GetBoolean(), configured.ToString());
+            Assert.True(configured.GetProperty("libraryHintVisible").GetBoolean(), configured.ToString());
+            Assert.True(configured.GetProperty("startable").GetBoolean(), configured.ToString());
+            Assert.Equal("Program", configured.GetProperty("startAction").GetString());
+            var projectXml = XDocument.Load(projectPath);
+            Assert.Equal("Program", projectXml.Descendants("StartAction").Single().Value);
+            Assert.Equal(hostDll, projectXml.Descendants("StartProgram").Single().Value);
+
+            var breakpointLine = FindLine(librarySource, "var result = \"library hit\";");
+            await _app.InvokeAsync("od.open-file", librarySource);
+            await _app.InvokeAsync("od.debug.clear-breakpoints");
+            var breakpoint = await _app.InvokeAsync("od.debug.set-breakpoint", librarySource, breakpointLine);
+            Assert.True(breakpoint.GetProperty("success").GetBoolean(), breakpoint.ToString());
+            var shortcut = await _app.InvokeAsync("od.workbench.invoke-shortcut", "f5");
+            Assert.True(shortcut.GetProperty("success").GetBoolean(), shortcut.ToString());
+            JsonElement debug = default;
+            var deadline = DateTime.UtcNow.AddSeconds(45);
+            while (DateTime.UtcNow < deadline)
+            {
+                debug = await _app.InvokeAsync("od.debug.location");
+                if (debug.GetProperty("stopped").GetBoolean()) break;
+                await Task.Delay(200);
+            }
+            if (!debug.GetProperty("stopped").GetBoolean())
+            {
+                var output = await _app.InvokeAsync("od.debug.output");
+                Assert.Fail($"The library breakpoint was not hit. Start: {debug}; Debug output: {output}");
+            }
+            Assert.Equal(breakpointLine, debug.GetProperty("currentLine").GetInt32());
+            Assert.EndsWith("LibraryCode.cs", Normalize(debug.GetProperty("currentFile").GetString()));
+        }
+        finally
+        {
+            await _app.InvokeAsync("od.debug.stop");
+            await _app.InvokeAsync("od.open-solution", _app.DebugTestProjectPath);
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]

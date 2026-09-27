@@ -173,6 +173,11 @@ internal abstract class ProjectBrowserControllerBase : IProjectBrowserController
     public void Open(ProjectBrowserNodeContext? node = null)
     {
         var target = ResolveNode(node);
+        if (target?.Kind == ProjectBrowserNodeKind.Project)
+        {
+            Host?.ShowPropertiesForNode(target);
+            return;
+        }
         if (target is null || !target.IsFileNode || target.Kind == ProjectBrowserNodeKind.MissingFile)
         {
             return;

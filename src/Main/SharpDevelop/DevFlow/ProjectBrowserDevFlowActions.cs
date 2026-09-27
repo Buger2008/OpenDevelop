@@ -17,6 +17,8 @@ using System.Windows;
 using System.Windows.Controls;
 using ICSharpCode.Core;
 using ICSharpCode.SharpDevelop.Services;
+using ICSharpCode.SharpDevelop.Project.Dialogs;
+using ICSharpCode.SharpDevelop.Gui.OptionPanels;
 using ICSharpCode.SharpDevelop.Workbench;
 using LeXtudio.DevFlow.Agent.Core;
 using Microsoft.Maui.DevFlow.Agent.Core;
@@ -71,6 +73,54 @@ namespace ICSharpCode.SharpDevelop.DevFlow
 			} catch (Exception ex) {
 				return JsonSerializer.Serialize(new { success = false, error = ex.ToString() });
 			}
+		}
+
+		[DevFlowAction("od.project-browser.open-selected", Description = "Activate the selected Project Browser node as a double-click does and report any project options view")]
+		public static string OpenSelectedNode()
+		{
+			var viewModel = OpenDevelopMefHost.ExportProvider.GetExportedValue<ProjectBrowserViewModel>();
+			viewModel.OpenSelected();
+			var options = SD.Workbench.ViewContentCollection.OfType<ProjectOptionsView>()
+				.FirstOrDefault(view => view.Project?.FileName == SD.ProjectService.CurrentProject?.FileName);
+			return JsonSerializer.Serialize(new {
+				projectOptionsOpen = options != null,
+				projectName = options?.Project?.Name,
+				tabs = (options?.Control as ICSharpCode.SharpDevelop.Gui.TabbedOptions)?.Items
+					.OfType<TabItem>().Select(tab => tab.Header?.ToString()).ToArray() ?? Array.Empty<string>(),
+				activeView = SD.Workbench.ActiveViewContent?.GetType().Name
+			});
+		}
+
+		[DevFlowAction("od.project-options.configure-debug-host", Description = "Configure the active project's Debug options through its options panel and save the project")]
+		public static async Task<string> ConfigureDebugHost(string program, string workingDirectory)
+		{
+			var project = SD.ProjectService.CurrentProject;
+			var options = SD.Workbench.ViewContentCollection.OfType<ProjectOptionsView>()
+				.FirstOrDefault(view => view.Project == project);
+			if (options?.Control is not ICSharpCode.SharpDevelop.Gui.TabbedOptions tabs)
+				return JsonSerializer.Serialize(new { success = false, error = "Project Options is not open for the selected project." });
+			var debugTab = tabs.Items.OfType<TabItem>().FirstOrDefault(tab =>
+				tab.Header?.ToString()?.Contains("Debug", StringComparison.OrdinalIgnoreCase) == true);
+			if (debugTab == null)
+				return JsonSerializer.Serialize(new { success = false, error = "Debug options tab is unavailable." });
+			tabs.SelectedItem = debugTab;
+			await Application.Current.Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Background);
+			var panel = tabs.OptionPanels.OfType<DebugOptions>().FirstOrDefault();
+			if (panel == null)
+				return JsonSerializer.Serialize(new { success = false, error = "Debug options panel did not load." });
+			panel.StartAction.Value = ICSharpCode.SharpDevelop.Project.StartAction.Program;
+			panel.StartProgram.Value = program;
+			panel.StartWorkingDirectory.Value = workingDirectory;
+			options.Save();
+			return JsonSerializer.Serialize(new {
+				success = true,
+				project = project.Name,
+				libraryHintVisible = (panel.FindName("ClassLibraryHint") as TextBlock)?.Visibility == Visibility.Visible,
+				startAction = panel.StartAction.Value.ToString(),
+				startProgram = panel.StartProgram.Value,
+				workingDirectory = panel.StartWorkingDirectory.Value,
+				startable = project.IsStartable
+			});
 		}
 
 		[DevFlowAction("od.project-browser.solution-tree", Description = "The solution level of the Project Browser tree - solution folders, projects and solution items, nested as shown - without the contents of each project")]

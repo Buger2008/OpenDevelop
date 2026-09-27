@@ -152,6 +152,16 @@ internal sealed class ProjectBrowserViewModel : ToolPaneModel, IProjectBrowserHo
 
     void IProjectBrowserHost.ShowPropertiesForNode(ProjectBrowserNodeContext node)
     {
+        if (node.Kind == ProjectBrowserNodeKind.Project)
+        {
+            var project = SD.ProjectService.CurrentSolution?.Projects.FirstOrDefault(candidate =>
+                string.Equals(candidate.FileName.ToString(), node.FullPath, StringComparison.OrdinalIgnoreCase));
+            if (project != null)
+            {
+                Project.Commands.ViewProjectOptions.ShowProjectOptions(project);
+                return;
+            }
+        }
         propertyContainer.SelectedObject = new ProjectBrowserNodeProperties(node);
         SD.Workbench.GetPad(typeof(PropertyPad))?.BringPadToFront();
     }
@@ -175,6 +185,11 @@ internal sealed class ProjectBrowserViewModel : ToolPaneModel, IProjectBrowserHo
     
     public void ShowProperties()
     {
+        if (SelectedNode?.Kind == ProjectBrowserNodeKind.Project)
+        {
+            ((IProjectBrowserHost)this).ShowPropertiesForNode(SelectedNode.ToContext());
+            return;
+        }
         propertyContainer.SelectedObject = SelectedNode != null ? new ProjectBrowserNodeProperties(SelectedNode.ToContext()) : null;
         SD.Workbench.GetPad(typeof(PropertyPad))?.BringPadToFront();
     }

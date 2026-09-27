@@ -2657,6 +2657,15 @@ namespace ICSharpCode.SharpDevelop.DevFlow
 				isProcessRunning = debugger?.IsProcessRunning ?? false
 			});
 		}
+
+		[DevFlowAction("od.debug.location", Description = "Read the current debugger stop location for an asynchronous F5 integration journey")]
+		public static string GetDebugLocation()
+		{
+			var debugger = SD.Debugger;
+			return SerializeDebugLocation(debugger.IsDebugging
+				&& !debugger.IsProcessRunning
+				&& GetIntProperty(debugger, "CurrentLine") > 0);
+		}
 		
 		[DevFlowAction("od.debug.clear-breakpoints", Description = "Clear debugger breakpoints for one file or all files")]
 		public static string ClearDebugBreakpoints(string filePath = null)

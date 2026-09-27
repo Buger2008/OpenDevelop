@@ -39,6 +39,14 @@ namespace ICSharpCode.SharpDevelop.Gui.OptionPanels
 		{
 			InitializeComponent();
 		}
+
+		protected override void Load(MSBuildBasedProject project, string configuration, string platform)
+		{
+			base.Load(project, configuration, platform);
+			ClassLibraryHint.Visibility = project is CompilableProject compilable
+				&& compilable.OutputType == OutputType.Library
+				? Visibility.Visible : Visibility.Collapsed;
+		}
 		
 		public ProjectProperty<StartAction> StartAction
 		{
