@@ -123,6 +123,58 @@ namespace ICSharpCode.SharpDevelop.DevFlow
 			});
 		}
 
+		[DevFlowAction("od.project-options.exercise-page", Description = "Exercise one C# project options page through its loaded panel, optionally save a representative setting, and report the value")]
+		public static async Task<string> ExercisePage(string page, string? value = null)
+		{
+			try {
+				var project = SD.ProjectService.CurrentProject;
+				var options = SD.Workbench.ViewContentCollection.OfType<ProjectOptionsView>()
+					.FirstOrDefault(view => view.Project == project);
+				if (options?.Control is not ICSharpCode.SharpDevelop.Gui.TabbedOptions tabs)
+					return JsonSerializer.Serialize(new { success = false, error = "Project Options is not open." });
+				var tab = tabs.Items.OfType<TabItem>().FirstOrDefault(item =>
+					item.Header?.ToString()?.Contains(page, StringComparison.OrdinalIgnoreCase) == true);
+				if (tab == null)
+					return JsonSerializer.Serialize(new { success = false, error = "Page not found: " + page });
+				tabs.SelectedItem = tab;
+				await Application.Current.Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Background);
+				var panel = tabs.OptionPanels.FirstOrDefault(item => ReferenceEquals(item.Control, tab.Content));
+				if (panel == null)
+					return JsonSerializer.Serialize(new { success = false, error = "Page did not load: " + page });
+				string? actual;
+				switch (panel) {
+					case ApplicationSettings application:
+						if (value != null) application.AssemblyName.Value = value;
+						actual = application.AssemblyName.Value;
+						break;
+					case ReferencePaths references:
+						var editor = references.FindName("editor") as ICSharpCode.SharpDevelop.Gui.StringListEditor;
+						if (editor == null) throw new InvalidOperationException("Reference path editor is missing.");
+						if (value != null) editor.LoadList(new[] { value });
+						actual = string.Join(";", editor.GetList());
+						break;
+					case Signing signing:
+						if (value != null) signing.SignAssembly.Value = bool.Parse(value);
+						actual = signing.SignAssembly.Value.ToString();
+						break;
+					case BuildEvents eventsPanel:
+						if (value != null) eventsPanel.PreBuildEvent.Value = value;
+						actual = eventsPanel.PreBuildEvent.Value;
+						break;
+					case ProjectCustomToolOptionsPanel custom:
+						if (value != null) custom.FileNames = value;
+						actual = custom.FileNames;
+						break;
+					default:
+						return JsonSerializer.Serialize(new { success = false, error = "Unsupported page: " + panel.GetType().Name });
+				}
+				if (value != null) options.Save();
+				return JsonSerializer.Serialize(new { success = true, page = tab.Header?.ToString(), panel = panel.GetType().Name, value = actual });
+			} catch (Exception ex) {
+				return JsonSerializer.Serialize(new { success = false, error = ex.ToString() });
+			}
+		}
+
 		[DevFlowAction("od.project-browser.solution-tree", Description = "The solution level of the Project Browser tree - solution folders, projects and solution items, nested as shown - without the contents of each project")]
 		public static async Task<string> GetSolutionTree()
 		{

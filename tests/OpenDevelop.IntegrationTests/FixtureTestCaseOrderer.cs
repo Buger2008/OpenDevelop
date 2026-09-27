@@ -34,6 +34,7 @@ public sealed class FixtureTestCaseOrderer : ITestCaseOrderer
         // Solution-folder journeys on their own SlnxFixture copies; same app state as WorkbenchTests.
         if (testName.Contains("SolutionFolderTests", StringComparison.Ordinal)) return 25;
         if (testName.Contains("AddReferenceTests", StringComparison.Ordinal)) return 26;
+        if (testName.Contains("ProjectOptionsIntegrationTests", StringComparison.Ordinal)) return 27;
         if (testName.Contains("AddInTests", StringComparison.Ordinal)) return 30;
         if (testName.Contains("CodeCoverageTests", StringComparison.Ordinal)) return 40;
         if (testName.Contains("DebuggerIntegrationTests", StringComparison.Ordinal)) return 50;

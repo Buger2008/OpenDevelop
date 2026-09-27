@@ -22,7 +22,7 @@ using ICSharpCode.SharpDevelop.Project;
 
 namespace ICSharpCode.SharpDevelop.Gui.OptionPanels
 {
-	partial class BuildEvents : ProjectOptionPanel
+	public partial class BuildEvents : ProjectOptionPanel
 	{
 		public BuildEvents()
 		{
