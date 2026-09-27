@@ -68,7 +68,21 @@ namespace ICSharpCode.SharpDevelop.Templates
                     template.ShortNameList.FirstOrDefault() ?? template.Identity,
                     template.Name,
                     template.Description,
-                    template.TagsCollection ?? new Dictionary<string, string>()))
+                    template.TagsCollection ?? new Dictionary<string, string>(),
+                    template.GroupIdentity,
+                    template.Classifications?.ToArray() ?? Array.Empty<string>(),
+                    template.Parameters
+                        .Select(parameter => new TemplateParameterSummary(
+                            parameter.Name,
+                            string.IsNullOrWhiteSpace(parameter.DisplayName) ? parameter.Name : parameter.DisplayName.Replace("_", string.Empty),
+                            parameter.Description,
+                            parameter.DataType,
+                            parameter.DefaultValue,
+                            parameter.IsName,
+                            parameter.Choices?.ToDictionary(choice => choice.Key,
+                                choice => string.IsNullOrWhiteSpace(choice.Value.DisplayName) ? choice.Key : choice.Value.DisplayName,
+                                StringComparer.OrdinalIgnoreCase)))
+                        .ToArray()))
                 .GroupBy(summary => summary.Identity, StringComparer.OrdinalIgnoreCase)
                 .Select(group => group
                     .OrderBy(summary => summary.Name, StringComparer.OrdinalIgnoreCase)

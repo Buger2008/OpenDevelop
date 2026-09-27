@@ -59,7 +59,11 @@ internal interface IProjectBrowserController
     void AddExistingFile(ProjectBrowserNodeContext? node = null);
     void AddExistingFolder(ProjectBrowserNodeContext? node = null);
     void AddNewItem(ProjectBrowserNodeContext? node = null);
+    /// <summary>Shows the New Item dialog for a directory not represented by a Project Browser node.</summary>
+    void AddNewItemInDirectory(string targetDirectory);
     void AddNewProject(ProjectBrowserNodeContext? node = null);
+    /// <summary>Shows the New Project dialog to create a new solution.</summary>
+    void CreateNewSolution();
     void Rename(ProjectBrowserNodeContext? node = null);
     void Delete(ProjectBrowserNodeContext? node = null);
     void IncludeInProject(ProjectBrowserNodeContext? node = null);
@@ -94,7 +98,7 @@ internal interface IProjectBrowserController
 internal sealed record NewItemDialogOutcome(TemplateSummary SelectedTemplate, string ItemName, IReadOnlyDictionary<string, string?> AdditionalParameters);
 
 /// <summary>Host-neutral result of the "Add New Project" dialog - see <see cref="ProjectBrowserControllerBase.ShowNewProjectDialogAsync"/>.</summary>
-internal sealed record NewProjectDialogOutcome(TemplateSummary SelectedTemplate, string ProjectName, string Location, IReadOnlyDictionary<string, string?> AdditionalParameters);
+internal sealed record NewProjectDialogOutcome(TemplateSummary SelectedTemplate, string ProjectName, string Location, IReadOnlyDictionary<string, string?> AdditionalParameters, string? SolutionName = null, bool CreateSolutionDirectory = true);
 
 /// <summary>A solution project that can be offered by the "Add Reference" dialog.</summary>
 internal sealed record ReferenceCandidate(string Name, string ProjectPath);
@@ -123,7 +127,7 @@ internal abstract class ProjectBrowserControllerBase : IProjectBrowserController
     protected abstract Task<NewItemDialogOutcome?> ShowNewItemDialogAsync(TemplateDiscoveryService service, string targetDirectory);
 
     /// <summary>Shows the host's native "Add New Project" dialog/window. Null return means the user cancelled.</summary>
-    protected abstract Task<NewProjectDialogOutcome?> ShowNewProjectDialogAsync(TemplateDiscoveryService service, string defaultLocation);
+    protected abstract Task<NewProjectDialogOutcome?> ShowNewProjectDialogAsync(TemplateDiscoveryService service, string defaultLocation, bool createNewSolution);
 
     /// <summary>Shows the host's "Add Reference" dialog. Null return means the user cancelled or the
     /// host has no such dialog; virtual rather than abstract so a host can opt in later.</summary>
@@ -200,11 +204,22 @@ internal abstract class ProjectBrowserControllerBase : IProjectBrowserController
 
     public async void AddNewItem(ProjectBrowserNodeContext? node = null)
     {
+        var selected = ResolveNode(node);
+        await AddNewItemAsync(ResolveTargetDirectoryForCreate(selected));
+    }
+
+    public async void AddNewItemInDirectory(string targetDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(targetDirectory))
+            throw new ArgumentException("A target directory is required.", nameof(targetDirectory));
+
+        await AddNewItemAsync(targetDirectory);
+    }
+
+    private async Task AddNewItemAsync(string targetDirectory)
+    {
         try
         {
-            var selected = ResolveNode(node);
-            var targetDirectory = ResolveTargetDirectoryForCreate(selected);
-
             using var service = new TemplateDiscoveryService();
             var dialog = await ShowNewItemDialogAsync(service, targetDirectory);
             if (dialog is null)
@@ -214,6 +229,11 @@ internal abstract class ProjectBrowserControllerBase : IProjectBrowserController
             var template = dialog.SelectedTemplate;
 
             var parameters = new Dictionary<string, string?>(dialog.AdditionalParameters, StringComparer.OrdinalIgnoreCase);
+            // Item templates do not all expose the template engine's implicit --name symbol in
+            // their parameter list. Pass it explicitly as well: otherwise a sourceName-based
+            // template can create its literal scaffold filename (for example TextTemplate.tt)
+            // instead of the name entered in the New File dialog.
+            parameters.TryAdd("name", itemName);
 
             var result = await service.InstantiateAsync(
                 template, itemName, targetDirectory, parameters, CancellationToken.None);
@@ -225,9 +245,26 @@ internal abstract class ProjectBrowserControllerBase : IProjectBrowserController
                 return;
             }
 
+            var primaryOutputPaths = result.PrimaryOutputPaths.ToList();
+            // The bundled T4 item template has a fixed scaffold filename. Preserve the New File
+            // contract by applying the item name to its output and its source-name tokens.
+            if (string.Equals(template.Identity, "OpenDevelop.Templates.TextTemplate.Item", StringComparison.Ordinal)
+                && primaryOutputPaths.Count == 1)
+            {
+                var generated = primaryOutputPaths[0];
+                var requested = Path.Combine(targetDirectory, itemName + ".tt");
+                if (File.Exists(generated) && !string.Equals(generated, requested, StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Move(generated, requested);
+                    var content = File.ReadAllText(requested).Replace("TextTemplate", itemName, StringComparison.Ordinal);
+                    File.WriteAllText(requested, content);
+                    primaryOutputPaths[0] = requested;
+                }
+            }
+
             // For T4 template files, automatically set the custom tool generator so the template
             // is processed on save (like the legacy .xft system did).
-            foreach (var path in result.PrimaryOutputPaths)
+            foreach (var path in primaryOutputPaths)
             {
                 if (!path.EndsWith(".tt", StringComparison.OrdinalIgnoreCase))
                     continue;
@@ -250,10 +287,10 @@ internal abstract class ProjectBrowserControllerBase : IProjectBrowserController
                     item.CustomTool = "TextTemplatingFileGenerator";
             }
 
-            if (result.PrimaryOutputPaths.Count > 0)
+            if (primaryOutputPaths.Count > 0)
             {
                 Host?.RefreshSolutionTree();
-                Host?.OpenFileInWorkbench(result.PrimaryOutputPaths[0]);
+                Host?.OpenFileInWorkbench(primaryOutputPaths[0]);
             }
         }
         catch (Exception ex)
@@ -265,13 +302,18 @@ internal abstract class ProjectBrowserControllerBase : IProjectBrowserController
 
     public async void AddNewProject(ProjectBrowserNodeContext? node = null)
     {
+        await AddNewProjectAsync(node, createNewSolution: false);
+    }
+
+    private async Task AddNewProjectAsync(ProjectBrowserNodeContext? node, bool createNewSolution)
+    {
         try
         {
             var selected = ResolveNode(node);
             var defaultLocation = ResolveTargetDirectoryForCreate(selected);
 
             using var service = new TemplateDiscoveryService();
-            var dialog = await ShowNewProjectDialogAsync(service, defaultLocation);
+            var dialog = await ShowNewProjectDialogAsync(service, defaultLocation, createNewSolution);
             if (dialog is null)
                 return;
 
@@ -279,7 +321,11 @@ internal abstract class ProjectBrowserControllerBase : IProjectBrowserController
             var location = dialog.Location;
             var template = dialog.SelectedTemplate;
 
-            var projectDir = Path.Combine(location, projectName);
+            var solutionName = string.IsNullOrWhiteSpace(dialog.SolutionName) ? projectName : dialog.SolutionName;
+            var solutionRoot = createNewSolution && dialog.CreateSolutionDirectory
+                ? Path.Combine(location, solutionName)
+                : location;
+            var projectDir = Path.Combine(solutionRoot, projectName);
             Directory.CreateDirectory(projectDir);
 
             var result = await service.InstantiateAsync(
@@ -296,10 +342,12 @@ internal abstract class ProjectBrowserControllerBase : IProjectBrowserController
 
             var projectService = ServiceSingleton.GetRequiredService<IProjectService>();
 
-            var generatedSolutionFile = FindGeneratedSolutionFile(result, projectDir);
+            var generatedSolutionFile = FindGeneratedSolutionFile(result, solutionRoot);
             var generatedProjectFiles = FindGeneratedProjectFiles(result, projectDir);
 
-            var currentSolution = projectService.CurrentSolution;
+            // File > New > Solution must never turn into "add a project" merely because a
+            // solution happens to be open. The Project Browser command retains that behavior.
+            var currentSolution = createNewSolution ? null : projectService.CurrentSolution;
             if (currentSolution is not null)
             {
                 if (generatedProjectFiles.Count == 0)
@@ -355,13 +403,17 @@ internal abstract class ProjectBrowserControllerBase : IProjectBrowserController
                 }
 
                 // No solution was generated by the template, so create a wrapper .slnx and add all projects.
-                var solutionDir = Path.GetDirectoryName(generatedProjectFiles[0]) ?? location;
-                var solutionFileName = Path.Combine(solutionDir, projectName + ".slnx");
+                var solutionFileName = Path.Combine(solutionRoot, solutionName + ".slnx");
                 var newSolution = projectService.CreateEmptySolutionFile(FileName.Create(solutionFileName));
                 foreach (var projectPath in generatedProjectFiles)
                 {
                     newSolution.AddExistingProject(FileName.Create(projectPath));
                 }
+
+                // CreateEmptySolutionFile initializes the in-memory solution only. Persist the
+                // wrapper after adding the generated project so File > New > Solution leaves a
+                // usable .slnx on disk.
+                newSolution.Save();
 
                 projectService.OpenSolution(newSolution);
                 Host?.RefreshSolutionTree();
@@ -373,6 +425,13 @@ internal abstract class ProjectBrowserControllerBase : IProjectBrowserController
             ServiceSingleton.GetRequiredService<IMessageService>()
                 .ShowException(ex, "Failed to add new project.");
         }
+    }
+
+    public void CreateNewSolution()
+    {
+        // A forced new-solution branch creates a wrapper .slnx when the chosen dotnet template
+        // only emits a project, even if another solution is currently open.
+        _ = AddNewProjectAsync(null, createNewSolution: true);
     }
 
     static string? FindGeneratedSolutionFile(TemplateInstantiationResult result, string fallbackRoot)

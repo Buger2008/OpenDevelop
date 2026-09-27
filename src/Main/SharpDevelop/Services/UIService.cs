@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 using System.Collections.Generic;
+using System.IO;
 
 using ICSharpCode.Core;
 using ICSharpCode.SharpDevelop.Project;
@@ -25,26 +26,43 @@ using ICSharpCode.SharpDevelop.Templates;
 namespace ICSharpCode.SharpDevelop
 {
 	/// <summary>
-	/// MVP note: SolutionConfigurationEditor/NewFileDialog/NewProjectDialog are all WinForms dialogs with
-	/// no WPF replacement yet (out of MVP scope) - these are stubbed as no-ops/null returns rather than
-	/// hand-ported, per the task's "stub what has no WPF equivalent" policy.
+	/// Compatibility facade for the legacy menu commands. Project and item creation is implemented by
+	/// the WPF Project Browser's dotnet-template workflow; its asynchronous UI cannot preserve the old
+	/// synchronous result objects, which no live WPF caller consumes.
 	/// </summary>
 	class UIService : IUIService
 	{
 		public void ShowSolutionConfigurationEditorDialog(ISolution solution)
 		{
-			// no-op: no WPF solution configuration editor exists yet.
+			if (solution == null)
+				return;
+			Services.SolutionConfigurationWindow.Show(solution, System.Windows.Application.Current.MainWindow);
 		}
 
 		public FileTemplateResult ShowNewFileDialog(IProject project, DirectoryName directory, IEnumerable<TemplateCategory> templates)
 		{
-			// no WPF "New File" dialog exists yet.
+			var targetDirectory = directory?.ToString();
+			if (string.IsNullOrWhiteSpace(targetDirectory)) {
+				targetDirectory = SD.ProjectService.CurrentSolution?.Directory.ToString()
+					?? Directory.GetCurrentDirectory();
+			}
+
+			ServiceSingleton.GetRequiredService<Services.IProjectBrowserController>()
+				.AddNewItemInDirectory(targetDirectory);
 			return null;
 		}
 
 		public ProjectTemplateResult ShowNewProjectDialog(ISolutionFolder solutionFolder, IEnumerable<TemplateCategory> templates)
 		{
-			// no WPF "New Project" dialog exists yet.
+			if (solutionFolder is null) {
+				ServiceSingleton.GetRequiredService<Services.IProjectBrowserController>().CreateNewSolution();
+			} else {
+				// All compiled callers that supplied a solution folder now use the WPF Project Browser
+				// command directly. Do not silently pretend the legacy synchronous API completed.
+				ServiceSingleton.GetRequiredService<IMessageService>().ShowMessage(
+					"Use Solution Explorer > Add > New Project to add a project to an existing solution.",
+					"New Project");
+			}
 			return null;
 		}
 	}

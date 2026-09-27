@@ -1,0 +1,166 @@
+using System.Text.Json;
+using Xunit;
+
+namespace OpenDevelop.IntegrationTests;
+
+[Collection("40 New project dialog fixture")]
+public sealed class NewProjectDialogIntegrationTests
+{
+    readonly OpenDevelopAppFixture _app;
+    public NewProjectDialogIntegrationTests(OpenDevelopAppFixture app) => _app = app;
+
+    [Fact]
+    public async Task BlazorFrameworkChoice_HasVisibleFallbackLabel()
+    {
+        var template = await _app.InvokeAsync("od.template.inspect", "Blazor Web App");
+        var framework = template.GetProperty("Parameters")
+            .EnumerateArray()
+            .Single(parameter => parameter.GetProperty("Name").GetString() == "Framework");
+
+        var choices = framework.GetProperty("Choices");
+        Assert.Equal("net10.0", choices.GetProperty("net10.0").GetString());
+    }
+
+    [Fact]
+    public async Task NewFileDialog_ConstructsAndExposesTemplatePicker()
+    {
+        var targetDirectory = Path.Combine(Path.GetTempPath(), "opendevelop-new-item-dialog");
+        Directory.CreateDirectory(targetDirectory);
+        var opened = await _app.InvokeAsync("od.new-item-dialog", targetDirectory);
+        Assert.True(opened.GetProperty("started").GetBoolean());
+        try
+        {
+            JsonElement tree = default;
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                await Task.Delay(250);
+                tree = await _app.GetUITreeAsync();
+                var text = tree.ToString();
+                if (text.Contains("NewItemWindow") && text.Contains("Item name:") && text.Contains("Template options:"))
+                    return;
+            }
+            Assert.Fail("New File dialog did not expose its item-name and template-option controls. UI tree: " + tree);
+        }
+        finally
+        {
+            var closed = await _app.InvokeAsync("od.new-item-dialog.close");
+            Assert.True(closed.GetProperty("closed").GetBoolean());
+        }
+    }
+
+    [Fact]
+    public async Task NewSolutionDialog_CreatesProjectAndSolutionFiles()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "opendevelop-new-solution-" + Guid.NewGuid().ToString("N"));
+        const string solutionName = "CreatedSolution";
+        const string projectName = "CreatedConsole";
+        try
+        {
+            Assert.True((await _app.InvokeAsync("od.new-solution-dialog")).GetProperty("started").GetBoolean());
+            await WaitForWindowAsync("NewProjectWindow");
+            await WaitForTemplatesAsync("project");
+            var submitted = await _app.InvokeAsync("od.new-solution-dialog.create", "Console App", projectName, root, solutionName);
+            Assert.True(submitted.GetProperty("submitted").GetBoolean(), submitted.ToString());
+
+            var solutionRoot = Path.Combine(root, solutionName);
+            var projectDirectory = Path.Combine(solutionRoot, projectName);
+            var projectFile = Path.Combine(projectDirectory, projectName + ".csproj");
+            var programFile = Path.Combine(projectDirectory, "Program.cs");
+            await WaitForFileAsync(projectFile);
+            await WaitForFileAsync(Path.Combine(solutionRoot, solutionName + ".slnx"));
+            Assert.Contains("Microsoft.NET.Sdk", await File.ReadAllTextAsync(projectFile));
+            Assert.Contains("Hello, World!", await File.ReadAllTextAsync(programFile));
+        }
+        finally
+        {
+            await _app.InvokeAsync("od.new-solution-dialog.close");
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task NewFileDialog_CreatesTemplateOutput()
+    {
+        var targetDirectory = Path.Combine(Path.GetTempPath(), "opendevelop-new-file-" + Guid.NewGuid().ToString("N"));
+        const string itemName = "GeneratedTemplate";
+        try
+        {
+            Directory.CreateDirectory(targetDirectory);
+            Assert.True((await _app.InvokeAsync("od.new-item-dialog", targetDirectory)).GetProperty("started").GetBoolean());
+            await WaitForWindowAsync("NewItemWindow");
+            await WaitForTemplatesAsync("item");
+            var submitted = await _app.InvokeAsync("od.new-item-dialog.create", "Text Template (.tt)", itemName);
+            Assert.True(submitted.GetProperty("submitted").GetBoolean(), submitted.ToString());
+
+            var output = Path.Combine(targetDirectory, itemName + ".tt");
+            await WaitForFileAsync(output);
+            var text = await File.ReadAllTextAsync(output);
+            Assert.Contains("namespace GeneratedFromT4", text);
+            Assert.Contains("class GeneratedTemplate", text);
+        }
+        finally
+        {
+            await _app.InvokeAsync("od.new-item-dialog.close");
+            if (Directory.Exists(targetDirectory)) Directory.Delete(targetDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task NewSolutionDialog_ConstructsAndExposesTemplatePicker()
+    {
+        var opened = await _app.InvokeAsync("od.new-solution-dialog");
+        Assert.True(opened.GetProperty("started").GetBoolean());
+        try
+        {
+            JsonElement tree = default;
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                await Task.Delay(250);
+                tree = await _app.GetUITreeAsync();
+                var text = tree.ToString();
+                if (text.Contains("NewProjectWindow") && text.Contains("Project name:") && text.Contains("Template options:"))
+                    return;
+            }
+            Assert.Fail("New Solution dialog did not expose its project-name and template-option controls. UI tree: " + tree);
+        }
+        finally
+        {
+            var closed = await _app.InvokeAsync("od.new-solution-dialog.close");
+            Assert.True(closed.GetProperty("closed").GetBoolean());
+        }
+    }
+
+    async Task WaitForWindowAsync(string windowType)
+    {
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            if ((await _app.GetUITreeAsync()).ToString().Contains(windowType)) return;
+            await Task.Delay(250);
+        }
+        Assert.Fail($"Expected {windowType} to appear.");
+    }
+
+    async Task WaitForTemplatesAsync(string kind)
+    {
+        for (var attempt = 0; attempt < 80; attempt++)
+        {
+            var status = await _app.InvokeAsync("od.new-template-dialog.status");
+            if (status.GetProperty("open").GetBoolean()
+                && status.GetProperty("kind").GetString() == kind
+                && status.GetProperty("templateCount").GetInt32() > 0)
+                return;
+            await Task.Delay(250);
+        }
+        Assert.Fail($"The {kind} template dialog did not finish loading its templates.");
+    }
+
+    static async Task WaitForFileAsync(string path)
+    {
+        for (var attempt = 0; attempt < 80; attempt++)
+        {
+            if (File.Exists(path)) return;
+            await Task.Delay(250);
+        }
+        Assert.Fail($"Expected generated file was not created: {path}");
+    }
+}

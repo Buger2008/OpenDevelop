@@ -46,6 +46,110 @@ namespace ICSharpCode.SharpDevelop.DevFlow
 	[DevFlowUIThread]
 	public static class OpenDevelopDevFlowActions
 	{
+		[DevFlowAction("od.new-solution-dialog", Description = "Open the WPF New Solution dialog for integration testing")]
+		public static object NewSolutionDialog()
+		{
+			ServiceSingleton.GetRequiredService<Services.IProjectBrowserController>().CreateNewSolution();
+			return "{\"started\":true}";
+		}
+
+		[DevFlowAction("od.new-solution-dialog.close", Description = "Close the WPF New Solution dialog after integration testing")]
+		public static object CloseNewSolutionDialog()
+		{
+			var dialog = System.Windows.Application.Current.Windows.OfType<Templates.NewProjectWindow>().FirstOrDefault();
+			if (dialog is null)
+				return "{\"closed\":false}";
+			dialog.DialogResult = false;
+			return "{\"closed\":true}";
+		}
+
+		[DevFlowAction("od.new-item-dialog", Description = "Open the WPF New File dialog for integration testing")]
+		public static object NewItemDialog(string targetDirectory)
+		{
+			ServiceSingleton.GetRequiredService<Services.IProjectBrowserController>()
+				.AddNewItemInDirectory(targetDirectory);
+			return "{\"started\":true}";
+		}
+
+		[DevFlowAction("od.new-item-dialog.close", Description = "Close the WPF New File dialog after integration testing")]
+		public static object CloseNewItemDialog()
+		{
+			var dialog = System.Windows.Application.Current.Windows.OfType<Templates.NewItemWindow>().FirstOrDefault();
+			if (dialog is null)
+				return "{\"closed\":false}";
+			dialog.DialogResult = false;
+			return "{\"closed\":true}";
+		}
+
+		[DevFlowAction("od.new-solution-dialog.create", Description = "Fill and submit the WPF New Solution dialog for end-to-end integration testing")]
+		public static string CreateNewSolutionFromDialog(string templateSearch, string projectName, string location, string solutionName)
+		{
+			var dialog = System.Windows.Application.Current.Windows.OfType<Templates.NewProjectWindow>().FirstOrDefault();
+			if (dialog is null)
+				return "{\"submitted\":false,\"error\":\"New Solution dialog is not open\"}";
+
+			RequireDialogControl<TextBox>(dialog, "NameBox").Text = projectName;
+			RequireDialogControl<TextBox>(dialog, "LocationBox").Text = location;
+			RequireDialogControl<TextBox>(dialog, "SolutionNameBox").Text = solutionName;
+			RequireDialogControl<CheckBox>(dialog, "CreateSolutionDirectoryBox").IsChecked = true;
+			SelectFirstMatchingTemplate(dialog, templateSearch);
+			var create = RequireDialogControl<Button>(dialog, "CreateButton");
+			if (!create.IsEnabled)
+				return "{\"submitted\":false,\"error\":\"Create button is disabled\"}";
+			create.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+			return "{\"submitted\":true}";
+		}
+
+		[DevFlowAction("od.new-item-dialog.create", Description = "Fill and submit the WPF New File dialog for end-to-end integration testing")]
+		public static string CreateNewItemFromDialog(string templateSearch, string itemName)
+		{
+			var dialog = System.Windows.Application.Current.Windows.OfType<Templates.NewItemWindow>().FirstOrDefault();
+			if (dialog is null)
+				return "{\"submitted\":false,\"error\":\"New File dialog is not open\"}";
+
+			RequireDialogControl<TextBox>(dialog, "NameBox").Text = itemName;
+			SelectFirstMatchingTemplate(dialog, templateSearch);
+			var add = RequireDialogControl<Button>(dialog, "AddButton");
+			if (!add.IsEnabled)
+				return "{\"submitted\":false,\"error\":\"Add button is disabled\"}";
+			add.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+			return "{\"submitted\":true}";
+		}
+
+		static T RequireDialogControl<T>(Window dialog, string name) where T : FrameworkElement =>
+			dialog.FindName(name) as T ?? throw new InvalidOperationException($"Dialog control '{name}' was not found.");
+
+		static void SelectFirstMatchingTemplate(Window dialog, string templateSearch)
+		{
+			RequireDialogControl<TextBox>(dialog, "SearchBox").Text = templateSearch;
+			var templates = RequireDialogControl<ListView>(dialog, "TemplateList");
+			if (templates.Items.Count == 0)
+				throw new InvalidOperationException($"No template matched '{templateSearch}'.");
+			templates.SelectedItem = templates.Items[0];
+		}
+
+		[DevFlowAction("od.new-template-dialog.status", Description = "Report template loading state for New Project/New File dialog integration tests")]
+		public static string GetNewTemplateDialogStatus()
+		{
+			var project = System.Windows.Application.Current.Windows.OfType<Templates.NewProjectWindow>().FirstOrDefault();
+			if (project is not null)
+				return JsonSerializer.Serialize(new { open = true, kind = "project", templateCount = project.Templates.Count });
+			var item = System.Windows.Application.Current.Windows.OfType<Templates.NewItemWindow>().FirstOrDefault();
+			if (item is not null)
+				return JsonSerializer.Serialize(new { open = true, kind = "item", templateCount = item.Templates.Count });
+			return "{\"open\":false,\"templateCount\":0}";
+		}
+
+		[DevFlowAction("od.template.inspect", Description = "Inspect installed template parameters for integration testing")]
+		public static string InspectTemplate(string name)
+		{
+			using var service = new Templates.TemplateDiscoveryService();
+			var template = System.Threading.Tasks.Task.Run(async () =>
+				(await service.GetInstalledTemplatesAsync(System.Threading.CancellationToken.None))
+				.FirstOrDefault(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase))).GetAwaiter().GetResult();
+			return System.Text.Json.JsonSerializer.Serialize(template);
+		}
+
 		// DevFlow discovers actions once, before AddIn autostart commands load lazy assemblies.
 		// Keep these two stable integration-test entry points in the always-loaded shell and
 		// forward without introducing a compile-time FormsDesigner dependency.

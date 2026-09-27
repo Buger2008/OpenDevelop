@@ -62,15 +62,16 @@ internal sealed class ProjectBrowserController : ProjectBrowserControllerBase
             new Dictionary<string, string?>(dialog.AdditionalParameters, StringComparer.OrdinalIgnoreCase));
     }
 
-    protected override async Task<NewProjectDialogOutcome?> ShowNewProjectDialogAsync(TemplateDiscoveryService service, string defaultLocation)
+    protected override async Task<NewProjectDialogOutcome?> ShowNewProjectDialogAsync(TemplateDiscoveryService service, string defaultLocation, bool createNewSolution)
     {
         var owner = System.Windows.Application.Current.MainWindow;
-        var dialog = await NewProjectWindow.ShowAsync(service, defaultLocation, owner);
+        var dialog = await NewProjectWindow.ShowAsync(service, defaultLocation, createNewSolution, owner);
         if (dialog is null || dialog.SelectedTemplate is null)
             return null;
 
         return new NewProjectDialogOutcome(dialog.SelectedTemplate, dialog.ProjectName, dialog.Location,
-            new Dictionary<string, string?>(dialog.AdditionalParameters, StringComparer.OrdinalIgnoreCase));
+            new Dictionary<string, string?>(dialog.AdditionalParameters, StringComparer.OrdinalIgnoreCase),
+            dialog.SolutionName, dialog.CreateSolutionDirectory);
     }
 
     protected override Task<AddReferenceDialogOutcome?> ShowAddReferenceDialogAsync(string projectName, IReadOnlyList<ReferenceCandidate> candidates)
