@@ -131,6 +131,54 @@ namespace ICSharpCode.SharpDevelop.DevFlow
 			});
 		}
 
+		[DevFlowAction("od.project-browser.invoke-project-options", Description = "Invoke Project Options through the Project Browser's real AddIn-tree context-menu item and report the opened options view")]
+		public static async Task<string> InvokeProjectOptions(string? projectName = null)
+		{
+			try {
+				var viewModel = OpenDevelopMefHost.ExportProvider.GetExportedValue<ProjectBrowserViewModel>();
+				await viewModel.WaitForCurrentRefreshAsync();
+				var node = FindNode(viewModel.RootNodes, n => n.Kind == ProjectBrowserNodeKind.Project
+					&& (string.IsNullOrEmpty(projectName) || string.Equals(n.Name, projectName, StringComparison.OrdinalIgnoreCase)));
+				if (node == null)
+					return JsonSerializer.Serialize(new { success = false, error = "No matching project node." });
+
+				viewModel.SelectedNode = node;
+				var context = node.ToContext();
+				var menuItem = FindMenuItem(ICSharpCode.Core.Presentation.MenuService.CreateMenuItems(
+					null, context, context.ContextMenuPath, "ContextMenu"), "Project Options...");
+				if (menuItem == null)
+					return JsonSerializer.Serialize(new { success = false, error = "Project Options menu item is unavailable." });
+
+				// Raise the same Click event WPF raises for the right-click popup. Unlike od.menu.invoke,
+				// this resolves the class= attribute through this add-in's Runtime imports.
+				menuItem.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+				await Application.Current.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
+				var project = SD.ProjectService.CurrentProject;
+				var options = SD.Workbench.ViewContentCollection.OfType<ProjectOptionsView>()
+					.FirstOrDefault(view => view.Project == project);
+				return JsonSerializer.Serialize(new {
+					success = options != null,
+					projectOptionsOpen = options != null,
+					projectName = options?.Project?.Name,
+					error = options == null ? "Project Options did not open." : null
+				});
+			} catch (Exception ex) {
+				return JsonSerializer.Serialize(new { success = false, error = ex.ToString() });
+			}
+		}
+
+		static MenuItem? FindMenuItem(IEnumerable items, string header)
+		{
+			foreach (var item in items.OfType<MenuItem>()) {
+				if (string.Equals(item.Header?.ToString(), header, StringComparison.Ordinal))
+					return item;
+				var nested = FindMenuItem(item.Items, header);
+				if (nested != null)
+					return nested;
+			}
+			return null;
+		}
+
 		[DevFlowAction("od.project-options.configure-debug-host", Description = "Configure the active project's Debug options through its options panel and save the project")]
 		public static async Task<string> ConfigureDebugHost(string program, string workingDirectory)
 		{

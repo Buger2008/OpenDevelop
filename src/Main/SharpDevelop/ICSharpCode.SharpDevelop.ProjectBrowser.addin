@@ -23,6 +23,9 @@
        every DevFlow action depending on it (e.g. od.open-solution) 404s. -->
   <Runtime>
     <Import assembly=":OpenDevelop"/>
+    <!-- Project Options remains implemented by the base SharpDevelop assembly.  Context-menu
+         command classes are resolved in this add-in's Runtime scope, not the main add-in's. -->
+    <Import assembly=":ICSharpCode.SharpDevelop"/>
   </Runtime>
 
   <!-- Reuses the native "SolutionOpen" condition evaluator already registered by
