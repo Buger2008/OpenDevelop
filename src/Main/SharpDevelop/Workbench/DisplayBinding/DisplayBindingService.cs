@@ -19,7 +19,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using ICSharpCode.Core;
+using ICSharpCode.SharpDevelop.LanguageServices.Xaml;
 
 namespace ICSharpCode.SharpDevelop.Workbench
 {
@@ -207,6 +209,17 @@ namespace ICSharpCode.SharpDevelop.Workbench
 			foreach (DisplayBindingDescriptor binding in bindings) {
 				if (binding.IsSecondary && binding.CanOpenFile(viewContent.PrimaryFileName)) {
 					ISecondaryDisplayBinding displayBinding = binding.SecondaryBinding;
+					// A binding that declares its dialects owns exactly those files, so the
+					// workbench routes on the dialect rather than letting every binding decide
+					// which other bindings it has to decline. That exclusion list was the reason
+					// each new dialect cost an edit in every other binding. A null dialect means
+					// nothing claimed the file, and must not filter anything out - a WPF file
+					// whose project is not in the open solution is still designed today.
+					string? dialect = XamlDialectRegistry.ResolveDialect(viewContent.PrimaryFileName);
+					if (displayBinding is IXamlDialectDisplayBinding dialectBinding
+					    && dialect != null
+					    && !dialectBinding.Dialects.Contains(dialect, StringComparer.OrdinalIgnoreCase))
+						continue;
 					if (displayBinding != null
 					    && (!isReattaching || displayBinding.ReattachWhenParserServiceIsReady)
 					    && displayBinding.CanAttachTo(viewContent))

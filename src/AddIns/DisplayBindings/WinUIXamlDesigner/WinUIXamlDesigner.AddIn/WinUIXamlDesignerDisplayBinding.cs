@@ -1,12 +1,17 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using ICSharpCode.SharpDevelop.LanguageServices.Xaml;
 using ICSharpCode.SharpDevelop.Workbench;
 
 namespace ICSharpCode.WinUIXamlDesigner;
 
-public sealed class WinUIXamlDesignerDisplayBinding : ISecondaryDisplayBinding
+public sealed class WinUIXamlDesignerDisplayBinding : IXamlDialectDisplayBinding
 {
+	/// <summary>WinUI and Uno are one designer here - the same binding and the same two hosts -
+	/// so it declares ownership of both dialects rather than being told to decline one.
+	public IEnumerable<string> Dialects { get { return new[] { XamlDialectKeys.WinUI, XamlDialectKeys.Uno }; } }
+
 	// WinUI project evaluation (especially a solution using .slnx plus imported props) can finish
 	// after the source view is first opened.  The initial detector result is then Unknown and no
 	// secondary Design view is attached; opting into the parser-ready reattach is what lets the

@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using ICSharpCode.Core;
 using ICSharpCode.SharpDevelop;
@@ -50,8 +51,13 @@ namespace ICSharpCode.WpfDesign.AddIn
 		}
 	}
 	
-	public class WpfSecondaryDisplayBinding : ISecondaryDisplayBinding
+	public class WpfSecondaryDisplayBinding : IXamlDialectDisplayBinding
 	{
+		/// <summary>WPF owns exactly the WPF dialect. The workbench routes on this, so the
+		/// WinUI/Uno check this binding used to repeat is gone: adding a dialect no longer
+		/// means editing this file.</summary>
+		public IEnumerable<string> Dialects { get { return new[] { XamlDialectKeys.Wpf }; } }
+
 		public bool ReattachWhenParserServiceIsReady {
 			get {
 				return false;
@@ -61,9 +67,6 @@ namespace ICSharpCode.WpfDesign.AddIn
 		public bool CanAttachTo(IViewContent content)
 		{
 			if (Path.GetExtension(content.PrimaryFileName).Equals(".xaml", StringComparison.OrdinalIgnoreCase)) {
-				var framework = XamlFrameworkDetector.Detect(content.PrimaryFileName.ToString());
-				if (framework.Kind == XamlFrameworkKind.WinUI || framework.Kind == XamlFrameworkKind.Uno)
-					return false;
 				IEditable editable = content.GetService<IEditable>();
 				if (editable != null) {
 					try {
