@@ -1,9 +1,10 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Text;
@@ -15,6 +16,7 @@ using ProGPU.Xaml.Workspaces;
 using XamlStudio.Toolkit.Services;
 using ICSharpCode.Core;
 using ICSharpCode.SharpDevelop;
+using ICSharpCode.WinUIXamlDesigner.UnoDesignHost;
 
 namespace ICSharpCode.WinUIXamlDesigner.ProGPUHost;
 
@@ -27,6 +29,10 @@ sealed class ProGpuXamlExecutor : IProGpuXamlExecutor, IDisposable
 {
 	readonly RoslynXamlProjectPreviewService previewService = new();
 	readonly WinUiXamlLivePreviewSession session = new();
+	// Holds the activated App.xaml wrapper, so its collectible load context outlives every render.
+	readonly WinUiXamlLivePreviewSession appSession = new();
+	ResourceDictionary appResources;
+	bool appResourcesLoaded;
 	readonly WinUiXamlProfile profile = new();
 	readonly string resourceUri;
 	AdhocWorkspace workspace;
@@ -48,6 +54,18 @@ sealed class ProGpuXamlExecutor : IProGpuXamlExecutor, IDisposable
 		if (!WinUiXamlLivePreviewSession.IsRuntimeSupported)
 			throw new InvalidOperationException(WinUiXamlLivePreviewSession.RuntimeSupportMessage);
 
+		// A page's {StaticResource} is resolved while it activates, falling back to
+		// Application.Current.Resources - so the app's resources must be in place first.
+		await EnsureAppResourcesAsync().ConfigureAwait(true);
+		InstallAppResources();
+
+		// TryUpdate keeps the previous tree when the candidate fails to load or activate, so an
+		// invalid edit degrades to "last good preview" instead of a blank or crashed design pane.
+		return await CompileAndActivateAsync(session, xaml).ConfigureAwait(true);
+	}
+
+	async Task<FrameworkElement> CompileAndActivateAsync(WinUiXamlLivePreviewSession target, string xaml)
+	{
 		var project = EnsureProject();
 		var preview = await previewService.CompileAsync(
 			project,
@@ -73,10 +91,8 @@ sealed class ProGpuXamlExecutor : IProGpuXamlExecutor, IDisposable
 		if (artifact == null || !artifact.Success)
 			throw new InvalidOperationException(DescribeFailure(preview));
 
-		// TryUpdate keeps the previous tree when the candidate fails to load or activate, so an
-		// invalid edit degrades to "last good preview" instead of a blank or crashed design pane.
 		FrameworkElement published = null;
-		var result = session.TryUpdate(
+		var result = target.TryUpdate(
 			artifact.PeImage.ToArray(),
 			preview.QualifiedTypeName,
 			root => published = root);
@@ -84,6 +100,78 @@ sealed class ProGpuXamlExecutor : IProGpuXamlExecutor, IDisposable
 			throw new InvalidOperationException(result.Message);
 
 		return published ?? result.Root;
+	}
+
+	/// <summary>
+	/// Compiles the owning project's App.xaml resources once per executor. ProGPU has no runtime
+	/// XAML reader - markup only becomes objects through the same compile-and-activate pipeline
+	/// as the page - so the self-contained dictionary AppResourceBuilder produces (the one the
+	/// out-of-process hosts receive over app/resources) is wrapped in a Grid, activated in its own
+	/// preview session, and its Resources taken from there. A failure only costs the app
+	/// resources: the page still renders, and a missing key then reports itself as before.
+	/// </summary>
+	async Task EnsureAppResourcesAsync()
+	{
+		if (appResourcesLoaded)
+			return;
+		appResourcesLoaded = true;
+		var appXaml = FindAppXaml();
+		if (appXaml == null)
+			return;
+		var errors = new List<string>();
+		var dictionary = AppResourceBuilder.Build(appXaml, errors);
+		foreach (var error in errors)
+			LoggingService.Warn("ProGPU WinUI designer: App.xaml resources: " + error);
+		if (dictionary == null)
+			return;
+		try {
+			var wrapper = new XElement(Presentation + "Grid",
+				new XAttribute(XNamespace.Xmlns + "x", XamlNamespace),
+				// Live preview only activates a root that carries x:Class.
+				new XAttribute(XamlNamespace + "Class", "OpenDevelop.DesignTime.ApplicationResources"),
+				new XElement(Presentation + "Grid.Resources", XElement.Parse(dictionary)));
+			var root = await CompileAndActivateAsync(appSession, wrapper.ToString()).ConfigureAwait(true);
+			appResources = root.Resources;
+		} catch (Exception e) {
+			LoggingService.Warn("ProGPU WinUI designer: App.xaml resources could not be compiled: " + e.GetBaseException().Message);
+		}
+	}
+
+	static readonly XNamespace Presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+	static readonly XNamespace XamlNamespace = "http://schemas.microsoft.com/winfx/2006/xaml";
+
+	string FindAppXaml()
+	{
+		var project = SD.ProjectService.FindProjectContainingFile(FileName.Create(resourceUri));
+		var directory = project?.Directory.ToString();
+		if (string.IsNullOrEmpty(directory))
+			return null;
+		var candidate = Path.Combine(directory, "App.xaml");
+		return File.Exists(candidate) ? candidate : null;
+	}
+
+	// Application.Current is process-wide while there is one executor per open document, so the
+	// dictionary merged into it is swapped for the rendering document's own before each render.
+	static ResourceDictionary installedAppResources;
+
+	void InstallAppResources()
+	{
+		var application = Application.Current;
+		if (application == null) {
+			// This offscreen host never runs AppRunner, the only code that assigns Current, and
+			// its setter is internal.
+			application = new Application();
+			typeof(Application).GetProperty(nameof(Application.Current))
+				.GetSetMethod(nonPublic: true)
+				.Invoke(null, new object[] { application });
+		}
+		if (ReferenceEquals(installedAppResources, appResources))
+			return;
+		if (installedAppResources != null)
+			application.Resources.MergedDictionaries.Remove(installedAppResources);
+		if (appResources != null)
+			application.Resources.MergedDictionaries.Add(appResources);
+		installedAppResources = appResources;
 	}
 
 	static string DescribeFailure(RoslynXamlProjectPreview preview)
@@ -203,7 +291,13 @@ sealed class ProGpuXamlExecutor : IProGpuXamlExecutor, IDisposable
 	{
 		if (disposed) return;
 		disposed = true;
+		if (ReferenceEquals(installedAppResources, appResources) && appResources != null) {
+			Application.Current?.Resources.MergedDictionaries.Remove(appResources);
+			installedAppResources = null;
+		}
+		appResources = null;
 		session.Dispose();
+		appSession.Dispose();
 		workspace?.Dispose();
 		workspace = null;
 	}

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -62,7 +62,9 @@ sealed class ProGpuRuntimeHost : IWinUIXamlRuntimeHost
         control.SurfacePointerPressed += OnSurfacePointerPressed;
         executor = new ProGpuXamlExecutor(documentFileName);
         renderService = new XamlRenderService(executor);
-        StatusText = $"ProGPU WinUI host ready for {framework?.Kind}.";
+        // framework.Kind is the designed project's dialect (an Uno project is still rendered by
+        // ProGPU's own WinUI implementation), so name the renderer, not the project kind.
+        StatusText = "ProGPU WinUI host ready.";
 
         // ThemeManager.CurrentTheme is a process-wide static that every real ProGPU host (Samples,
         // Samples.Uno, Samples.Avalonia) sets explicitly on startup - it otherwise stays at its
@@ -299,7 +301,7 @@ sealed class ProGpuRuntimeHost : IWinUIXamlRuntimeHost
                 control.WinUIRoot = element;
                 lastPreviewRoot = new WeakReference(element);
                 ResolveNameScope();
-                StatusText = $"Rendered by ProGPU for {framework?.Kind}.";
+                StatusText = "Rendered by ProGPU WinUI.";
             } else {
                 // The session retains its last good tree, so leave WinUIRoot alone and report why.
                 StatusText = Describe(result);

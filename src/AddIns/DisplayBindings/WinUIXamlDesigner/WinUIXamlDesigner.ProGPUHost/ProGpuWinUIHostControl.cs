@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -93,7 +93,8 @@ public unsafe sealed class ProGpuWinUIHostControl : WpfControl, IDisposable
             return "bad frame";
         static string Sample(byte[] px, int stride, int w, int h, double fx, double fy)
         {
-            var i = ((int)(fy * h) * stride + (int)(fx * w)) * 4;
+            // stride is already in bytes; only the column needs the 4-byte pixel width.
+            var i = (int)(fy * h) * stride + (int)(fx * w) * 4;
             // BGRA order from the compositor's Bgra8Unorm target.
             return $"#{px[i + 2]:X2}{px[i + 1]:X2}{px[i]:X2}";
         }

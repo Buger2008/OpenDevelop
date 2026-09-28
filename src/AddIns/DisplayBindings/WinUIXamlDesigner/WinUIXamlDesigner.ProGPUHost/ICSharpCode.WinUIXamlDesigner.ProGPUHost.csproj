@@ -13,6 +13,8 @@
   <ItemGroup>
     <ProjectReference Include="..\WinUIXamlDesigner.AddIn\ICSharpCode.WinUIXamlDesigner.csproj" Private="false" />
     <ProjectReference Include="..\XamlStudio.Toolkit.ProGPU\XamlStudio.Toolkit.ProGPU.csproj" />
+    <!-- Same App.xaml -> self-contained dictionary engine the out-of-process hosts use. -->
+    <Compile Include="..\WinUIXamlDesigner.UnoDesignHost\AppResourceBuilder.cs" Link="AppResourceBuilder.cs" />
     <PackageReference Include="ProGPU.WinUI" />
     <!-- Packed locally from the same wieslawsoltes/ProGPU commit that produced the published
          preview.47 feed (bab4dbef); upstream marks these packable but never published them. -->
