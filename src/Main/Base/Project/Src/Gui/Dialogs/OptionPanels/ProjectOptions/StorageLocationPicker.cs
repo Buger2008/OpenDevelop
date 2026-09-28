@@ -37,6 +37,12 @@ namespace ICSharpCode.SharpDevelop.Gui.OptionPanels
 			DefaultStyleKeyProperty.OverrideMetadata(typeof(StorageLocationPicker), new FrameworkPropertyMetadata(typeof(StorageLocationPicker)));
 		}
 		
+		public StorageLocationPicker()
+		{
+			// the "base" location dot follows the theme's text color (black would vanish on dark)
+			SetResourceReference(EllipseBackgroundProperty, "Foreground");
+		}
+		
 		public static readonly DependencyProperty LocationProperty =
 			DependencyProperty.Register(
 				"Location", typeof(PropertyStorageLocations), typeof(StorageLocationPicker),
@@ -83,7 +89,7 @@ namespace ICSharpCode.SharpDevelop.Gui.OptionPanels
 						p.EllipseBackground = Brushes.Violet;
 						break;
 					default:
-						p.EllipseBackground = Brushes.Black;
+						p.SetResourceReference(EllipseBackgroundProperty, "Foreground");
 						break;
 				}
 				if (p.contextMenu != null) {

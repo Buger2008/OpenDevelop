@@ -34,6 +34,13 @@ namespace ICSharpCode.SharpDevelop.Gui
 	/// </summary>
 	public class TabbedOptions : TabControl, ICanBeDirty
 	{
+		public TabbedOptions()
+		{
+			// Implicit styles are looked up by the exact type, so a TabControl subclass would
+			// otherwise miss the theme's TabControl style (and stay light on the dark theme).
+			SetResourceReference(StyleProperty, typeof(TabControl));
+		}
+		
 		public void AddOptionPanels(IEnumerable<IOptionPanelDescriptor> dialogPanelDescriptors)
 		{
 			if (dialogPanelDescriptors == null)
@@ -94,6 +101,7 @@ namespace ICSharpCode.SharpDevelop.Gui
 			
 			public OptionTabPage(TabbedOptions options, IOptionPanelDescriptor descriptor)
 			{
+				SetResourceReference(StyleProperty, typeof(TabItem));
 				this.options = options;
 				this.descriptor = descriptor;
 				string title = StringParser.Parse(descriptor.Label);
