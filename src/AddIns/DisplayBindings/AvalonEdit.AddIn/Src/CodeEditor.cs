@@ -183,7 +183,7 @@ namespace ICSharpCode.AvalonEdit.AddIn
 		{
 			var oldHighlighter = primaryTextEditor.GetService<IHighlighter>();
 			
-			var highlighting = HighlightingManager.Instance.GetDefinitionByExtension(Path.GetExtension(fileName));
+			var highlighting = AvalonEditorControlService.GetHighlightingDefinition(document);
 			var highlighter = SD.EditorControlService.CreateHighlighter(document);
 
 			primaryTextEditor.SyntaxHighlighting = highlighting;
@@ -213,6 +213,17 @@ namespace ICSharpCode.AvalonEdit.AddIn
 				oldHighlighter.Dispose();
 			}
 		}
+
+		void OnDocumentTextChangedForT4Highlighting(object sender, EventArgs e)
+		{
+			if (fileName == null || (fileName.GetExtension().ToLowerInvariant() != ".tt"
+				&& fileName.GetExtension().ToLowerInvariant() != ".t4"
+				&& fileName.GetExtension().ToLowerInvariant() != ".ttinclude"))
+				return;
+			var expected = AvalonEditorControlService.GetHighlightingDefinition(document);
+			if (!ReferenceEquals(primaryTextEditor.SyntaxHighlighting, expected))
+				UpdateSyntaxHighlighting(fileName);
+		}
 		
 		public void Redraw(ISegment segment, DispatcherPriority priority)
 		{
@@ -230,6 +241,7 @@ namespace ICSharpCode.AvalonEdit.AddIn
 			
 			this.FlowDirection = FlowDirection.LeftToRight; // code editing is always left-to-right
 			this.document = new TextDocument();
+			this.document.TextChanged += OnDocumentTextChangedForT4Highlighting;
 			var documentServiceContainer = document.GetRequiredService<IServiceContainer>();
 			
 			textMarkerService = new TextMarkerService(document);
@@ -795,6 +807,8 @@ namespace ICSharpCode.AvalonEdit.AddIn
 		
 		public void Dispose()
 		{
+			if (document != null)
+				document.TextChanged -= OnDocumentTextChangedForT4Highlighting;
 			(semanticColorizer as IDisposable)?.Dispose();
 			openLensRenderer?.Dispose();
 			CodeEditorOptions.Instance.PropertyChanged -= CodeEditorOptions_Instance_PropertyChanged;

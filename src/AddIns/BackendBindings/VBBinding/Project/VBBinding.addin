@@ -7,12 +7,19 @@
 	<Manifest>
 		<Identity name = "ICSharpCode.VBBinding"/>
 		<Dependency addin = "ICSharpCode.FormsDesigner"/>
+		<Dependency addin = "ICSharpCode.TextTemplating"/>
 	</Manifest>
 	
 	<Runtime>
 		<Import assembly = "ICSharpCode.VBBinding.dll"/>
 		<Import assembly = ":ICSharpCode.SharpDevelop"/>
 	</Runtime>
+
+	<!-- VB control blocks and .vb output in T4 templates; uses AvalonEdit's built-in VB mode.
+	     Registered here so disabling this AddIn also removes the VB mixed highlighting. -->
+	<Path name = "/SharpDevelop/ViewContent/AvalonEdit/T4SyntaxModes">
+		<T4SyntaxMode id="VB" language="VB;VBv3.5;VisualBasic" outputExtensions=".vb" syntaxMode="VB" />
+	</Path>
 
 	<Path name = "/SharpDevelop/Workbench/DisplayBindings">
 		<!-- WinForms Designer for .vb. The designability check and the .Designer.vb

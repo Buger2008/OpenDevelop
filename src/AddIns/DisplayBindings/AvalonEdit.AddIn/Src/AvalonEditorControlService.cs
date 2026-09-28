@@ -21,6 +21,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using ICSharpCode.AvalonEdit.AddIn.Options;
 using ICSharpCode.AvalonEdit.Document;
 using ICSharpCode.AvalonEdit.Highlighting;
@@ -37,6 +38,31 @@ namespace ICSharpCode.AvalonEdit.AddIn
 	/// </summary>
 	public class AvalonEditorControlService : IEditorControlService
 	{
+		static readonly Regex t4TemplateLanguage = new Regex(
+			@"<#@\s*template\b(?:(?!#>).)*\blanguage\s*=\s*(?:""(?<value>[^""]+)""|'(?<value>[^']+)')",
+			RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+		static readonly Regex t4OutputExtension = new Regex(
+			@"<#@\s*output\b(?:(?!#>).)*\bextension\s*=\s*(?:""(?<value>\.[^""]+)""|'(?<value>\.[^']+)')",
+			RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+
+		public static IHighlightingDefinition GetHighlightingDefinition(IDocument document)
+		{
+			if (document.FileName == null)
+				return null;
+			string extension = Path.GetExtension(document.FileName);
+			if (extension.Equals(".tt", StringComparison.OrdinalIgnoreCase)
+				|| extension.Equals(".t4", StringComparison.OrdinalIgnoreCase)
+				|| extension.Equals(".ttinclude", StringComparison.OrdinalIgnoreCase)) {
+				string language = t4TemplateLanguage.Match(document.Text).Groups["value"].Value;
+				string outputExtension = t4OutputExtension.Match(document.Text).Groups["value"].Value;
+				if (string.IsNullOrEmpty(language)) language = "C#"; // T4 engine default
+				if (string.IsNullOrEmpty(outputExtension)) outputExtension = ".cs";
+				var composed = T4HighlightingComposer.GetDefinition(language, outputExtension);
+				if (composed != null) return composed;
+			}
+			return HighlightingManager.Instance.GetDefinitionByExtension(extension);
+		}
+
 		public ITextEditorOptions GlobalOptions {
 			get { return CodeEditorOptions.Instance; }
 		}
@@ -52,7 +78,7 @@ namespace ICSharpCode.AvalonEdit.AddIn
 		{
 			if (document.FileName == null)
 				return new MultiHighlighter(document);
-			var def = HighlightingManager.Instance.GetDefinitionByExtension(Path.GetExtension(document.FileName));
+			var def = GetHighlightingDefinition(document);
 			if (def == null)
 				return new MultiHighlighter(document);
 			List<IHighlighter> highlighters = new List<IHighlighter>();

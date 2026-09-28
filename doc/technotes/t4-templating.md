@@ -96,6 +96,51 @@ a real platform limitation:
 
 ## 3. What's still skipped, and why each one is a genuinely bigger lift (not just a guard)
 
+### Mixed T4 / generated C# highlighting (OpenDevelop)
+
+The T4 addin registers only language-neutral directives and `<# ... #>` delimiters
+for `.tt`, `.t4`, and `.ttinclude`. It does not import C# or own a C# grammar.
+Language addins opt in with one `<T4SyntaxMode>` codon under
+`/SharpDevelop/ViewContent/AvalonEdit/T4SyntaxModes` (doozer in AvalonEdit.AddIn):
+
+```xml
+<T4SyntaxMode id="C#" language="C#;C#v3.5;CSharp" outputExtensions=".cs" syntaxMode="C#" />
+```
+
+VBBinding registers `language="VB;VBv3.5;VisualBasic" outputExtensions=".vb"` against
+AvalonEdit's built-in `VB` mode. FSharpBinding registers only `outputExtensions=".fs;.fsi;.fsx"`:
+T4 has no F# template language, so an F# template body pairs with C# or VB control blocks.
+
+`language` lists the T4 `template language` values whose `<# ... #>` blocks use
+`syntaxMode`; `outputExtensions` lists the T4 `output extension` values whose
+template body uses it. Either may be omitted. `T4HighlightingComposer` builds the
+definition at runtime from the base `TextTemplating` definition: the directive
+block keeps its own rules, the control block takes the code language's main rule
+set, and the body imports the output language's main rule set. The two directives
+are independent per the T4 specification, so a VB control block generating a
+`.cs` file combines the VB and C# registrations without a dedicated pair. No
+per-language xshd is needed, and the template file remains `.tt`.
+
+AvalonEdit lets a nested span win a tie against its parent span's end, so an embedded
+C# rule set would start its `#` preprocessor span on the closing `#>` and keep the rest
+of the line in C#. The composer therefore guards the code rule set's top-level spans and
+rules with a negative lookahead for the control block's end expression. Output-language
+spans are imported as-is, so a T4 block inside an output string literal (for example
+`"<#= name #>"` in `.cs` output) is still highlighted as part of the string.
+
+The registration must live in the language addin, which depends on T4: AvalonEdit
+has its own built-in `C#` definition, so resolving `GetDefinition("C#")` directly
+would keep C# highlighting in T4 even with CSharpBinding disabled. Only codons
+from enabled addins are built, so disabling a language addin removes its T4
+highlighting without changing T4 core. The composed definition is named
+`TextTemplating (code: X, output: Y)`; without any match it is plain `TextTemplating`.
+Editing the output directive switches the selected definition without reopening
+the file.
+
+This is lexical highlighting, not Roslyn analysis of an embedded C# document.
+Completion, diagnostics, and semantic colors inside T4 remain separate work.
+
+
 Unlike §1's items, these need *new* infrastructure this codebase doesn't have yet — not just
 adapting an upstream file:
 

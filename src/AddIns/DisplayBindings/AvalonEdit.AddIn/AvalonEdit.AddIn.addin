@@ -14,6 +14,7 @@
 			<Doozer name="SyntaxMode" class="ICSharpCode.AvalonEdit.AddIn.SyntaxModeDoozer"/>
 			<Doozer name="ContextActionOptionPanel" class="ICSharpCode.AvalonEdit.AddIn.ContextActions.ContextActionOptionPanelDoozer"/>
 			<Doozer name="Highlighter" class="ICSharpCode.AvalonEdit.AddIn.HighlighterDoozer"/>
+			<Doozer name="T4SyntaxMode" class="ICSharpCode.AvalonEdit.AddIn.T4SyntaxModeDoozer"/>
 		</Import>
 	</Runtime>
 	

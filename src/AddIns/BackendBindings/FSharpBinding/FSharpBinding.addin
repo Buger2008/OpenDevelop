@@ -6,6 +6,7 @@
 	
 	<Manifest>
 		<Identity name = "ICSharpCode.FSharpBinding"/>
+		<Dependency addin = "ICSharpCode.TextTemplating"/>
 	</Manifest>
 	
 	<Runtime>
@@ -18,6 +19,12 @@
 		            name       = "F#"
 		            extensions = ".fs;.fsi"
 		            resource   = "FSharpBinding.Resources.FS-Mode.xshd" />
+	</Path>
+
+	<!-- F# output in T4 templates. T4 has no F# template language, so only the template body
+	     (outside <# #>) uses F#; control blocks follow the template's C# or VB language. -->
+	<Path name = "/SharpDevelop/ViewContent/AvalonEdit/T4SyntaxModes">
+		<T4SyntaxMode id="F#" outputExtensions=".fs;.fsi;.fsx" syntaxMode="F#" />
 	</Path>
 
 	<Path name = "/SharpDevelop/MSBuildEngine/CompileTaskNames">

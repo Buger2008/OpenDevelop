@@ -1263,6 +1263,24 @@ namespace ICSharpCode.SharpDevelop.DevFlow
 			});
 		}
 
+		[DevFlowAction("od.t4.highlighting", Description = "Inspect the active T4 editor's actual syntax definition and colored source spans")]
+		public static string GetT4Highlighting()
+		{
+			var view = (SD.Workbench as WpfWorkbench)?.WorkbenchLayout?.ActiveContent as IViewContent
+				?? SD.Workbench.ActiveViewContent;
+			var textEditor = FindVisualDescendant<ICSharpCode.AvalonEdit.TextEditor>(view?.Control as System.Windows.DependencyObject);
+			if (textEditor?.Document == null || textEditor.SyntaxHighlighting == null)
+				return JsonSerializer.Serialize(new { success = false, error = "No highlighted text editor is active." });
+			using var highlighter = new DocumentHighlighter(textEditor.Document, textEditor.SyntaxHighlighting);
+			var sections = Enumerable.Range(1, textEditor.Document.LineCount)
+				.SelectMany(line => highlighter.HighlightLine(line).Sections)
+				.Select(section => new {
+					text = textEditor.Document.GetText(section.Offset, section.Length),
+					color = section.Color?.Name
+				}).ToArray();
+			return JsonSerializer.Serialize(new { success = true, definition = textEditor.SyntaxHighlighting.Name, sections });
+		}
+
 		/// <summary>
 		/// Resolves the shared <see cref="ILanguageService"/> for a file (via <see cref="LanguageServiceRegistry"/>,
 		/// same as every UI command) and syncs it to the file's current content (open-editor buffer if

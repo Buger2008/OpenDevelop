@@ -11,6 +11,7 @@
 	     ContextActions/WinForms Designer) is deferred to later phases - see doc for the full list. -->
 	<Manifest>
 		<Identity name = "ICSharpCode.CSharpBinding"/>
+		<Dependency addin = "ICSharpCode.TextTemplating"/>
 	</Manifest>
 
 	<Runtime>
@@ -82,6 +83,12 @@
 
 	<Path name = "/SharpDevelop/ViewContent/AvalonEdit/SyntaxModes">
 		<SyntaxMode id="C#" name="C#" extensions=".cs" resource="CSharpBinding.Resources.CSharp-Semantic.xshd" />
+	</Path>
+
+	<!-- C# control blocks and .cs output in T4 templates. Registered here, not in TextTemplating,
+	     so disabling this AddIn also removes the C# mixed highlighting. -->
+	<Path name = "/SharpDevelop/ViewContent/AvalonEdit/T4SyntaxModes">
+		<T4SyntaxMode id="C#" language="C#;C#v3.5;CSharp" outputExtensions=".cs" syntaxMode="C#" />
 	</Path>
 
 	<Path path = "/SharpDevelop/BackendBindings/ProjectOptions/C#">

@@ -200,6 +200,7 @@
          all seven DebuggerIntegrationTests/RuntimeUpgrade debugging journeys failed - which looked
          like "this repo has no working debugger" rather than one more addin nobody built. -->
     <_CoreAddinProject Include="../../src/AddIns/Debugger/Debugger.AddIn/Debugger.AddIn.csproj" />
+    <_CoreAddinProject Include="../../src/AddIns/Misc/TextTemplating/Project/TextTemplating.csproj" />
   </ItemGroup>
   <!-- Runtime-discovered addins are intentionally not ProjectReferences of SharpDevelop, so the
        integration runner owns their preparation graph.  Restore the complete graph here, before
