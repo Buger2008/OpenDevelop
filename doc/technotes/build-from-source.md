@@ -169,7 +169,9 @@ restore -> host -> addins -> designer-hosts (Windows only) -> payload -> smoke -
 ./dist.ps1 -Phase addins,payload       # rebuild all AddIns, then re-assemble
 ./dist.ps1 -Phase host                 # just the host publish
 ./dist.windows.bat --phase payload     # the .bat wrapper forwards flags too
+./dist.windows.bat --from payload      # payload, smoke, then zip
 ./dist.windows.bat --debug             # Debug configuration
+./dist.windows.bat -AddInMaxCpuCount 4 # native PowerShell parameter; increase only after validation
 ./dist.macos.sh --skip-publish         # macOS equivalent
 ```
 
@@ -182,6 +184,8 @@ restore -> host -> addins -> designer-hosts (Windows only) -> payload -> smoke -
   phase fails with an access-denied that now explains itself.
 - Phases that consume earlier artifacts fail with an actionable message
   (*"Run './dist.ps1 -Phase host' first"*) instead of assembling around a missing host.
+- Every completed phase prints its elapsed time. Use a full run's per-phase timings to choose
+  further optimizations rather than comparing only noisy end-to-end durations.
 
 **The patch workflow** - roughly a minute instead of a full ~15-minute `dist.windows.bat`:
 
@@ -193,6 +197,10 @@ restore -> host -> addins -> designer-hosts (Windows only) -> payload -> smoke -
 Never hand-copy a DLL into `OpenDevelop-win/` instead: that skips the payload's by-name dedup and
 its out-of-process-host exemptions, and has repeatedly produced a payload that looks patched but
 crashes. The `payload` phase compiles nothing but the launchers and applies those rules every time.
+On Windows it mirrors the unchanged host publish and `data` with `robocopy /MIR`; AddIns are updated
+from the current filtered closure without recopying unchanged files, while stale files are removed.
+The x64/ARM64 launchers are reused when their project and shared build inputs are unchanged, otherwise
+they are rebuilt. Removed files therefore cannot survive an incremental run.
 
 The Windows payload is architecture-neutral (`OpenDevelop.dll` is started as
 `dotnet exec OpenDevelop.dll`) except for the one thing that must be architecture-specific: the

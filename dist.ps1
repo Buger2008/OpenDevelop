@@ -154,6 +154,60 @@ function Remove-RepoGeneratedDirectory {
     if ($LASTEXITCODE -ne 0) { throw "dist.ps1: failed to remove generated directory: $fullPath" }
 }
 
+function Sync-WindowsDirectoryMirror {
+    <#
+      robocopy /MIR has the same important correctness property as deleting a generated payload
+      before Copy-Item: target files no longer present in the source are removed. Unlike a fresh
+      recursive copy it retains unchanged host files, making `-Phase payload` cheap after an
+      AddIn-only rebuild. Robocopy exit codes 0..7 describe successful copy/difference states;
+      only 8 and above are errors.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Description,
+        [string[]]$ExcludeDirectories = @(),
+        [string[]]$ExcludeFiles = @()
+    )
+
+    if (-not $IsWindows) { throw 'Sync-WindowsDirectoryMirror is Windows-only.' }
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        throw "dist.ps1: mirror source does not exist: $Source"
+    }
+
+    Write-Host "==> Synchronizing $Description..."
+    # /MIR reports every purged file as EXTRA even with /NFL and /NDL. Keep normal release output
+    # compact, but retain the detailed robocopy report when a locked file or I/O failure occurs.
+    $logPath = Join-Path ([System.IO.Path]::GetTempPath()) ("opendevelop-robocopy-" + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        $exclusions = @()
+        if ($ExcludeDirectories.Count -gt 0) { $exclusions += '/XD'; $exclusions += $ExcludeDirectories }
+        if ($ExcludeFiles.Count -gt 0) { $exclusions += '/XF'; $exclusions += $ExcludeFiles }
+        & robocopy.exe $Source $Destination /MIR /COPY:DAT /DCOPY:DAT /XJ /R:2 /W:1 /NFL /NDL /NJH /NJS /NP @exclusions "/LOG:$logPath" | Out-Null
+        $robocopyExitCode = $LASTEXITCODE
+        if ($robocopyExitCode -ge 8) {
+            $diagnostics = if (Test-Path -LiteralPath $logPath) {
+                (Get-Content -LiteralPath $logPath -Tail 120) -join [Environment]::NewLine
+            } else { '(robocopy did not create a log)' }
+            throw "dist.ps1: robocopy failed while synchronizing $Description (exit code $robocopyExitCode). " +
+                  "Something may still have the payload open. Re-run with -Kill, or stop OpenDevelop/dotnet first.`n$diagnostics"
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+
+function Write-DistributionStepElapsed {
+    param(
+        [Parameter(Mandatory)][System.Diagnostics.Stopwatch]$Stopwatch,
+        [Parameter(Mandatory)][string]$Step
+    )
+    $Stopwatch.Stop()
+    Write-Host ("    {0}: {1:N1}s" -f $Step, $Stopwatch.Elapsed.TotalSeconds)
+    $Stopwatch.Restart()
+}
 
 # Get-PinnedGitVersionProperties now lives in build/common.psm1, shared with build.ps1.
 
@@ -216,6 +270,43 @@ function Build-Launchers {
             Remove-Item -Recurse -Force $publishDir -ErrorAction SilentlyContinue
         }
     }
+}
+
+function Test-WindowsLaunchersCurrent {
+    <#
+      Launchers are independent of the host/AddIn payload and are expensive to publish twice on
+      every `-Phase payload`. Reuse them only when every launcher input predates every required
+      output. The normal payload validation still checks both PE machine types afterwards.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$PayloadRoot
+    )
+
+    $requiredOutputs = @(
+        'OpenDevelop.exe', 'OpenDevelopARM64.exe', 'OpenDevelop.Bootstrap.dll',
+        'OpenDevelop.Bootstrap.deps.json', 'OpenDevelop.Bootstrap.runtimeconfig.json'
+    ) | ForEach-Object { Join-Path $PayloadRoot $_ }
+    if (@($requiredOutputs | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -gt 0) {
+        return $false
+    }
+
+    $launcherRoot = Join-Path $RepoRoot 'src/Main/OpenDevelop.Launcher'
+    # bin/ and obj/ are outputs from the preceding launcher publish; treating them as inputs would
+    # make their fresh timestamps invalidate this cache forever.
+    $inputs = @(Get-ChildItem -LiteralPath $launcherRoot -Recurse -File | Where-Object {
+        $relative = $_.FullName.Substring($launcherRoot.Length).TrimStart('\', '/').Replace('\', '/')
+        -not ($relative.StartsWith('bin/', [System.StringComparison]::OrdinalIgnoreCase) -or
+              $relative.StartsWith('obj/', [System.StringComparison]::OrdinalIgnoreCase))
+    })
+    foreach ($relativeInput in 'Directory.Build.props', 'Directory.Build.targets', 'global.json', 'NuGet.config') {
+        $input = Join-Path $RepoRoot $relativeInput
+        if (Test-Path -LiteralPath $input -PathType Leaf) { $inputs += Get-Item -LiteralPath $input }
+    }
+    $newestInput = ($inputs | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
+    $oldestOutput = (($requiredOutputs | ForEach-Object { Get-Item -LiteralPath $_ }) |
+        Measure-Object -Property LastWriteTimeUtc -Minimum).Minimum
+    return $newestInput -le $oldestOutput
 }
 
 function Test-PackagedAppStartup {
@@ -517,19 +608,14 @@ function Invoke-WindowsPayload {
     Assert-HostPublished
 
     Write-Host "==> Assembling the platform-neutral distribution payload ($config)..."
-    if (Test-Path $payloadRoot) {
-        try {
-            Remove-Item -Recurse -Force $payloadRoot -ErrorAction Stop
-        }
-        catch {
-            throw "dist.ps1: cannot clear $payloadRoot - $($_.Exception.Message)`n" +
-                  "Something still has the payload open. A previous smoke test's " +
-                  "'dotnet exec OpenDevelop.dll', or an out-of-process designer host that outlived " +
-                  "the IDE, is the usual cause. Re-run with -Kill, or stop OpenDevelop/dotnet first."
-        }
-    }
-    New-Item -ItemType Directory -Path $payloadRoot | Out-Null
-    Copy-Item -Path (Join-Path $publishDir '*') -Destination $payloadRoot -Recurse -Force
+    # Keep the exact-clean-output contract without needlessly deleting and re-copying an unchanged
+    # host publish closure. data/ and AddIns/ have different authoritative sources and are synced
+    # below, so exclude them here instead of purging/recreating thousands of unchanged files.
+    $payloadStepStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    Sync-WindowsDirectoryMirror -Source $publishDir -Destination $payloadRoot -Description 'host publish into Windows payload' `
+        -ExcludeDirectories @('AddIns', 'data') `
+        -ExcludeFiles @('OpenDevelop.exe', 'OpenDevelopARM64.exe', 'OpenDevelop.Bootstrap.dll', 'OpenDevelop.Bootstrap.deps.json', 'OpenDevelop.Bootstrap.runtimeconfig.json')
+    Write-DistributionStepElapsed $payloadStepStopwatch 'host mirror'
 
     # `dotnet publish` may preserve symbol/reference files from a Debug (and occasionally a
     # cached Release) build. They are neither loaded by the framework-dependent app nor useful
@@ -543,14 +629,14 @@ function Invoke-WindowsPayload {
     Remove-Item -LiteralPath $hostBuildOnlyFiles.FullName -Force -ErrorAction SilentlyContinue
     $hostReferenceDirs = Get-ChildItem -LiteralPath $payloadRoot -Recurse -Directory -Filter ref -ErrorAction SilentlyContinue
     foreach ($referenceDir in $hostReferenceDirs) { Remove-Item -LiteralPath $referenceDir.FullName -Recurse -Force }
-    # The main publish step still emits an apphost for the build machine's architecture; drop it -
-    # OpenDevelop.dll itself stays architecture-neutral (started as "dotnet exec OpenDevelop.dll").
-    # It is deliberately NOT what the user double-clicks; that is OpenDevelop.exe /
-    # OpenDevelopARM64.exe, built fresh below by Build-Launchers.
-    Remove-Item -LiteralPath (Join-Path $payloadRoot 'OpenDevelop.exe') -Force -ErrorAction SilentlyContinue
-
-    Write-Host '==> Building launchers (one native apphost per Windows architecture)...'
-    Build-Launchers -RepoRoot $repoRoot -DotNet $dotnet -Configuration $config -PayloadRoot $payloadRoot
+    if (Test-WindowsLaunchersCurrent -RepoRoot $repoRoot -PayloadRoot $payloadRoot) {
+        Write-Host '==> Reusing current Windows launchers (inputs unchanged)...'
+    }
+    else {
+        Write-Host '==> Building launchers (one native apphost per Windows architecture)...'
+        Build-Launchers -RepoRoot $repoRoot -DotNet $dotnet -Configuration $config -PayloadRoot $payloadRoot
+    }
+    Write-DistributionStepElapsed $payloadStepStopwatch 'host cleanup and launchers'
 
     # A RID-less publish carries EVERY platform's native tree (linux/osx/unix) as well as Windows.
     # The other platforms are dead weight in the Windows package, so drop everything except the
@@ -562,18 +648,29 @@ function Invoke-WindowsPayload {
         }
     }
 
+    Write-DistributionStepElapsed $payloadStepStopwatch 'runtime pruning'
+
     # OpenDevelop locates its addins and data at runtime by walking UP from the executable looking
     # for data/resources/languages/LanguageDefinition.xml (SharpDevelopMain.FindApplicationRootPath),
     # then loading *.addin from <root>/AddIns. The payload must therefore contain data/ and AddIns/
     # next to the executable so the walk resolves on the first step.
-    Copy-Item -Path (Join-Path $repoRoot 'data') -Destination (Join-Path $payloadRoot 'data') -Recurse -Force
+    Sync-WindowsDirectoryMirror -Source (Join-Path $repoRoot 'data') -Destination (Join-Path $payloadRoot 'data') -Description 'data into Windows payload'
+    Write-DistributionStepElapsed $payloadStepStopwatch 'data mirror'
 
     # AddIn build outputs carry their full dependency closures. Anything already supplied by the
     # published host resolves from the application base directory, so skip those files by name
     # instead of copying ~2 GB and pruning afterwards. This also keeps stale XML docs, satellite
-    # resources and native helpers from an old developer build out of the payload.
+    # resources and native helpers from an old developer build out of the payload. The incremental
+    # payload path intentionally retains AddIns/ and data/ across runs, so they must not contribute
+    # names here: only the host-owned part of the payload is eligible for copy-local de-duplication.
     $hostFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    Get-ChildItem -LiteralPath $payloadRoot -Recurse -File | ForEach-Object { [void]$hostFiles.Add($_.Name) }
+    Get-ChildItem -LiteralPath $payloadRoot -Recurse -File | ForEach-Object {
+        $relative = $_.FullName.Substring($payloadRoot.Length).TrimStart('\', '/').Replace('\', '/')
+        if (-not ($relative.StartsWith('AddIns/', [System.StringComparison]::OrdinalIgnoreCase) -or
+                  $relative.StartsWith('data/', [System.StringComparison]::OrdinalIgnoreCase))) {
+            [void]$hostFiles.Add($_.Name)
+        }
+    }
 
     $addInsSource = (Resolve-Path (Join-Path $repoRoot 'AddIns')).Path
     $addInsTarget = Join-Path $payloadRoot 'AddIns'
@@ -599,35 +696,71 @@ function Invoke-WindowsPayload {
         'LanguageServices\XamlLanguageServer.Wpf'
     )
 
-    # Select first, then copy in a plain foreach. A ForEach-Object block runs in a child scope, so
-    # a counter incremented inside one needs an explicit $script: qualifier — which silently
-    # counted nothing once this loop moved inside a function. Keeping the copy in a normal loop
-    # means the count and the filtering read the same way and cannot drift apart again.
-    $addInFiles = Get-ChildItem -LiteralPath $addInsSource -Recurse -File | Where-Object {
-        $name = $_.Name
-        $relative = $_.FullName.Substring($addInsSource.Length).TrimStart('\', '/')
+    # Index source files once. The old filter issued one Test-Path for every XML document and a
+    # nine-entry pipeline for every candidate; that became the dominant cost after copy itself was
+    # incremental. An in-memory DLL index and short-circuiting loop retain the exact filter rules.
+    $allAddInFiles = @(Get-ChildItem -LiteralPath $addInsSource -Recurse -File)
+    $addInDllPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in $allAddInFiles) {
+        if ($file.Extension -eq '.dll') { [void]$addInDllPaths.Add($file.FullName) }
+    }
+    $addInFiles = foreach ($file in $allAddInFiles) {
+        $name = $file.Name
+        if ($name -like '*.pdb' -or $name -like '*.dylib' -or $name -like '*.so' -or
+            $name -like 'LeXtudio.DevFlow.*' -or $name -like 'CliclickSharp*') { continue }
+        $relative = $file.FullName.Substring($addInsSource.Length).TrimStart('\', '/')
+        if ($relative -match '(^|[\\/])(ref|runtimes[\\/](linux|unix|osx))([\\/]|$)') { continue }
+        if ($file.Extension -eq '.xml' -and $addInDllPaths.Contains([System.IO.Path]::ChangeExtension($file.FullName, '.dll'))) { continue }
+
         $relativeDir = Split-Path -Parent $relative
-        $isOutOfProcessHost = $outOfProcessHostDirs | Where-Object { $relativeDir -eq $_ -or $relativeDir.StartsWith("$_\") }
-        -not ($name -like '*.pdb') -and
-        -not ($name -like '*.dylib') -and
-        -not ($name -like '*.so') -and
-        -not ($name -like 'LeXtudio.DevFlow.*') -and
-        -not ($name -like 'CliclickSharp*') -and
-        -not ($relative -match '(^|[\\/])(ref|runtimes[\\/](linux|unix|osx))([\\/]|$)') -and
-        -not ($_.Extension -eq '.xml' -and (Test-Path -LiteralPath (Join-Path $_.DirectoryName "$($_.BaseName).dll"))) -and
-        (-not $hostFiles.Contains($name) -or $isOutOfProcessHost)
+        $isOutOfProcessHost = $false
+        foreach ($hostDir in $outOfProcessHostDirs) {
+            if ($relativeDir -eq $hostDir -or $relativeDir.StartsWith("$hostDir\", [System.StringComparison]::OrdinalIgnoreCase)) {
+                $isOutOfProcessHost = $true
+                break
+            }
+        }
+        if (-not $hostFiles.Contains($name) -or $isOutOfProcessHost) { $file }
     }
 
+    $expectedAddInFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $copiedAddInCount = 0
+    $unchangedAddInCount = 0
     foreach ($file in $addInFiles) {
         $relative = $file.FullName.Substring($addInsSource.Length).TrimStart('\', '/')
+        [void]$expectedAddInFiles.Add($relative)
         $destination = Join-Path $addInsTarget $relative
+        $existing = Get-Item -LiteralPath $destination -ErrorAction SilentlyContinue
+        if ($existing -and $existing.Length -eq $file.Length -and $existing.LastWriteTimeUtc -eq $file.LastWriteTimeUtc) {
+            $unchangedAddInCount++
+            continue
+        }
         $destinationDir = Split-Path -Parent $destination
         if (-not (Test-Path -LiteralPath $destinationDir)) {
             New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
         }
         Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
+        $copiedAddInCount++
     }
-    Write-Host "    AddIn files copied: $(@($addInFiles).Count)"
+    $removedAddInCount = 0
+    if (Test-Path -LiteralPath $addInsTarget) {
+        Get-ChildItem -LiteralPath $addInsTarget -Recurse -File -Force | ForEach-Object {
+            $relative = $_.FullName.Substring($addInsTarget.Length).TrimStart('\', '/')
+            if (-not $expectedAddInFiles.Contains($relative)) {
+                Remove-Item -LiteralPath $_.FullName -Force
+                $removedAddInCount++
+            }
+        }
+        Get-ChildItem -LiteralPath $addInsTarget -Recurse -Directory -Force |
+            Sort-Object { $_.FullName.Length } -Descending |
+            ForEach-Object {
+                if (-not (Get-ChildItem -LiteralPath $_.FullName -Force | Select-Object -First 1)) {
+                    Remove-Item -LiteralPath $_.FullName -Force
+                }
+            }
+    }
+    Write-Host "    AddIns: copied $copiedAddInCount, unchanged $unchangedAddInCount, stale removed $removedAddInCount"
+    Write-DistributionStepElapsed $payloadStepStopwatch 'AddIn synchronization'
 
     # Out-of-process AddIns have their own deps.json and their own application base directory.
     # Patch every staged dependency manifest, not only OpenDevelop.deps.json, so the Forms/WPF
@@ -641,10 +774,12 @@ function Invoke-WindowsPayload {
     if ($payloadDepsPaths.Count -gt 0) {
         & $patchScript -DepsPath $payloadDepsPaths -NugetPackageRoot (Get-NuGetGlobalPackages) -WindowsX64PackageRoot $windowsX64CanonicalFeed -WindowsArm64PackageRoot $windowsArm64CanonicalFeed -Quiet
     }
+    Write-DistributionStepElapsed $payloadStepStopwatch 'dependency manifest patching'
 
     $appPath = Join-Path $payloadRoot 'OpenDevelop.dll'
     if (-not (Test-Path $appPath)) { throw "dist.ps1: packaged app not found: $appPath" }
     Test-WindowsDistributionPayload -PayloadRoot $payloadRoot
+    Write-DistributionStepElapsed $payloadStepStopwatch 'payload validation'
     Write-Host "Payload ready: $payloadRoot"
 
     return $payloadRoot
@@ -860,6 +995,7 @@ function Invoke-DistributionPipeline {
 
     $artifact = $null
     foreach ($name in $selected) {
+        $phaseStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         switch ($name) {
             'restore'        { Invoke-RestorePhase }
             'host'           { Invoke-HostPhase }
@@ -869,6 +1005,8 @@ function Invoke-DistributionPipeline {
             'smoke'          { if ($IsWindows) { Invoke-WindowsSmoke } else { Invoke-MacSmoke } }
             'zip'            { $artifact = if ($IsWindows) { Invoke-WindowsArchive } else { Invoke-MacArchive } }
         }
+        $phaseStopwatch.Stop()
+        Write-Host ("==> Phase '{0}' completed in {1:N1}s" -f $name, $phaseStopwatch.Elapsed.TotalSeconds)
     }
 
     if (-not $artifact) {

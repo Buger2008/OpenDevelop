@@ -364,27 +364,17 @@ foreach ($packageId in $portableProGpuPackageIds) {
     }
 }
 
-function Copy-PackageLibAsset([string]$packageRoot, [string]$packageId, [string]$version, [string]$fileName, [string]$destination) {
-    if (-not $packageRoot) { return $false }
-    $packagePath = Join-Path $packageRoot "$packageId.$version.nupkg"
-    if (-not (Test-Path -LiteralPath $packagePath)) { return $false }
-
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
+function Copy-ArchiveEntry([System.IO.Compression.ZipArchiveEntry]$Entry, [string]$Destination) {
+    if (-not $Entry) { return $false }
+    $destinationDir = Split-Path -Parent $Destination
+    New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
+    $input = $Entry.Open()
     try {
-        $entry = $archive.GetEntry("lib/net10.0/$fileName")
-        if (-not $entry) { return $false }
-        $destinationDir = Split-Path -Parent $destination
-        New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
-        $input = $entry.Open()
-        try {
-            $output = [System.IO.File]::Open($destination, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
-            try { $input.CopyTo($output) } finally { $output.Dispose() }
-        }
-        finally { $input.Dispose() }
-        return $true
+        $output = [System.IO.File]::Open($Destination, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+        try { $input.CopyTo($output) } finally { $output.Dispose() }
     }
-    finally { $archive.Dispose() }
+    finally { $input.Dispose() }
+    return $true
 }
 
 function Add-RidRuntimeTargets([hashtable]$deps, [string]$packageId, [string]$version, [string]$fileName) {
@@ -416,17 +406,21 @@ if ($WindowsX64PackageRoot -and $WindowsArm64PackageRoot) {
 
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $x64Archive = [System.IO.Compression.ZipFile]::OpenRead($x64Package)
+        $armArchive = [System.IO.Compression.ZipFile]::OpenRead($armPackage)
         try {
             $dllNames = @($x64Archive.Entries | Where-Object { $_.FullName -match '^lib/net10\.0/[^/]+\.dll$' } | ForEach-Object Name)
-        }
-        finally { $x64Archive.Dispose() }
-        foreach ($dllName in $dllNames) {
-            $x64Destination = Join-Path $outputDir "runtimes/win-x64/lib/net10.0/$dllName"
-            $armDestination = Join-Path $outputDir "runtimes/win-arm64/lib/net10.0/$dllName"
-            if ((Copy-PackageLibAsset $WindowsX64PackageRoot $packageId $version $dllName $x64Destination) -and
-                (Copy-PackageLibAsset $WindowsArm64PackageRoot $packageId $version $dllName $armDestination)) {
-                Add-RidRuntimeTargets $deps $packageId $version $dllName
+            foreach ($dllName in $dllNames) {
+                $x64Destination = Join-Path $outputDir "runtimes/win-x64/lib/net10.0/$dllName"
+                $armDestination = Join-Path $outputDir "runtimes/win-arm64/lib/net10.0/$dllName"
+                if ((Copy-ArchiveEntry $x64Archive.GetEntry("lib/net10.0/$dllName") $x64Destination) -and
+                    (Copy-ArchiveEntry $armArchive.GetEntry("lib/net10.0/$dllName") $armDestination)) {
+                    Add-RidRuntimeTargets $deps $packageId $version $dllName
+                }
             }
+        }
+        finally {
+            $armArchive.Dispose()
+            $x64Archive.Dispose()
         }
     }
 }
