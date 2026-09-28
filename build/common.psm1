@@ -226,10 +226,12 @@ function Build-Solution {
         [Parameter(Mandatory)][string]$Solution,
         [ValidateSet('Debug', 'Release')]
         [string]$Configuration = 'Debug',
+        [ValidateRange(1, 64)]
+        [int]$MaxCpuCount = 1,
         [string[]]$ExtraProperties = @()
     )
-    Write-Host '==> Building OpenDevelop.Mvp.sln and all addins...'
-    Invoke-Native $DotNet build $Solution -c $Configuration --no-restore '-m:1' -v minimal @ExtraProperties
+    Write-Host "==> Building OpenDevelop.Mvp.sln and all addins (-m:$MaxCpuCount)..."
+    Invoke-Native $DotNet build $Solution -c $Configuration --no-restore "-m:$MaxCpuCount" -v minimal @ExtraProperties
 }
 
 function Get-PinnedGitVersionProperties {

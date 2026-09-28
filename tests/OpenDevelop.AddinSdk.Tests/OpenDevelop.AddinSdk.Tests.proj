@@ -7,6 +7,7 @@
     <OutputPath>$(TestRoot)AddIns/Sample/</OutputPath>
     <OpenDevelopHostBin>$(TestRoot)Host/</OpenDevelopHostBin>
     <OpenDevelopHostManifest>$(OpenDevelopHostBin)OpenDevelop.host-assemblies.txt</OpenDevelopHostManifest>
+    <OpenDevelopHostPublishManifest>$(TestRoot)OpenDevelop.host-publish-files.txt</OpenDevelopHostPublishManifest>
     <OpenDevelopDistributionBuild>true</OpenDevelopDistributionBuild>
     <OpenDevelopDistributionRidFamily>osx</OpenDevelopDistributionRidFamily>
   </PropertyGroup>
@@ -19,14 +20,33 @@
   <Target Name="Prepare">
     <MakeDir Directories="$(OutputPath);$(OpenDevelopHostBin);$(OutputPath)ref;$(OutputPath)runtimes/win-x64;$(OutputPath)runtimes/osx" />
     <WriteLinesToFile File="$(OpenDevelopHostManifest)" Lines="Host.Shared.dll" Overwrite="true" />
+    <WriteLinesToFile File="$(OpenDevelopHostPublishManifest)" Lines="Host.Shared.dll" Overwrite="true" />
     <WriteLinesToFile File="$(OpenDevelopHostBin)Host.Shared.dll" Lines="host" Overwrite="true" />
     <WriteLinesToFile File="$(OutputPath)Host.Shared.dll" Lines="duplicate" Overwrite="true" />
+    <!-- Same filename in the host directory but absent from its published-assembly manifest:
+         it is add-in-owned and must survive. This locks the SDK to its exact manifest rather
+         than a costly, over-broad host-directory glob. -->
+    <WriteLinesToFile File="$(OpenDevelopHostBin)Addin.Private.dll" Lines="unpublished host build by-product" Overwrite="true" />
     <WriteLinesToFile File="$(OutputPath)Addin.Private.dll" Lines="private" Overwrite="true" />
     <WriteLinesToFile File="$(OutputPath)Addin.Private.xml" Lines="documentation" Overwrite="true" />
     <WriteLinesToFile File="$(OutputPath)Layout.xml" Lines="runtime layout" Overwrite="true" />
     <WriteLinesToFile File="$(OutputPath)ref/Reference.dll" Lines="reference" Overwrite="true" />
     <WriteLinesToFile File="$(OutputPath)runtimes/win-x64/native.dll" Lines="foreign" Overwrite="true" />
     <WriteLinesToFile File="$(OutputPath)runtimes/osx/native.dylib" Lines="current" Overwrite="true" />
+    <ItemGroup>
+      <ReferenceCopyLocalPaths Include="Host.Shared.dll;Addin.Private.dll" />
+      <None Include="Host.Shared.dll;Addin.Private.dll" />
+    </ItemGroup>
+  </Target>
+  <Target Name="AssertPublishManifestCopyLocalFilter" AfterTargets="RemoveHostProvidedFilesFromAddInCopyLocal">
+    <Error Condition="'@(ReferenceCopyLocalPaths->'%(Filename)%(Extension)')'.Contains('Host.Shared.dll')"
+           Text="Publish-manifest host DLL was not removed from ReferenceCopyLocalPaths." />
+    <Error Condition="!'@(ReferenceCopyLocalPaths->'%(Filename)%(Extension)')'.Contains('Addin.Private.dll')"
+           Text="Addin-private DLL was incorrectly removed from ReferenceCopyLocalPaths." />
+    <Error Condition="'@(None->'%(Filename)%(Extension)')'.Contains('Host.Shared.dll')"
+           Text="Publish-manifest host DLL was not removed from None copy candidates." />
+    <Error Condition="!'@(None->'%(Filename)%(Extension)')'.Contains('Addin.Private.dll')"
+           Text="Addin-private DLL was incorrectly removed from None copy candidates." />
   </Target>
   <Target Name="Assert">
     <Error Condition="Exists('$(OutputPath)Host.Shared.dll')" Text="Host-provided DLL was not trimmed." />

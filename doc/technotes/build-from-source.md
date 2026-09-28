@@ -20,7 +20,7 @@ locate `pwsh` and translate POSIX-style flags (`--skip-publish` → `-SkipPublis
 | `build.ps1` | **The inner loop.** Build ONE project (or a shortcut/fuzzy name) correctly. See below. |
 | `launch.ps1` / `launch.sh` | Build the whole solution and run the app; `-NoBuild`, `-BuildOnly`, `-Configuration`, files to open. |
 | `dist.ps1` | The publish/packaging pipeline, split into selectable phases. Also the fastest way to refresh a payload after a one-project change. |
-| `dist.windows.bat` / `dist.macos.sh` | Release entry points; wrappers around `dist.ps1` that also set up the local toolchain (macOS pins `SDKROOT` when the default `cc` cannot link). |
+| `dist.windows.bat` / `dist.macos.sh` | Release entry points; wrappers around `dist.ps1` that also set up the local toolchain (macOS pins `SDKROOT` when the default `cc` cannot link). Repeated macOS payload runs use `rsync --delete --delete-excluded` to update `OpenDevelop.app` incrementally while removing stale files; AddIn exclusions are derived only from the current host publish, never a prior bundle. |
 | `rebuild-all.sh` | macOS: repack LibreWPF → restore → build → run in one command (`--fast`, `--no-repack`, `--build-only`). |
 | `repack-librewpf.ps1` / `repack-librewpf.sh` | Build + pack the local LibreWPF/ProGPU packages into the feed and clear the stale `~/.nuget/packages` copies. Only needed when changing the LibreWPF fork itself. |
 | `release.macos.ps1` / `release.macos.sh` | Cuts a macOS DMG release (draft GitHub release); bundles the Addin SDK. See [addin-sdk.md](addin-sdk.md). |

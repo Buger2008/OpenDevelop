@@ -20,21 +20,47 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory, Position = 0)][string]$DepsPath,
+    [Parameter(Mandatory, Position = 0)][string[]]$DepsPath,
     [Parameter(Mandatory, Position = 1)][string]$NugetPackageRoot,
     [string]$WindowsX64PackageRoot,
-    [string]$WindowsArm64PackageRoot
+    [string]$WindowsArm64PackageRoot,
+    [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
 
+# A distribution patches many child-host manifests in one invocation. These filesystem queries
+# are stable for the invocation, so cache them instead of re-enumerating package versions and the
+# same runtime-overlay directories for every managed DLL we restore.
+$packageVersionCache = @{}
+$runtimeOverlayDirectoryCache = @{}
+
 function Find-PackageVersion([string]$nugetPackageRoot, [string]$packageIdLower) {
+    $cacheKey = "$nugetPackageRoot|$packageIdLower"
+    if ($packageVersionCache.ContainsKey($cacheKey)) { return $packageVersionCache[$cacheKey] }
     $pattern = Join-Path $nugetPackageRoot $packageIdLower
-    if (-not (Test-Path $pattern)) { return $null }
+    if (-not (Test-Path $pattern)) {
+        $packageVersionCache[$cacheKey] = $null
+        return $null
+    }
     $candidates = Get-ChildItem -Path $pattern -Directory -ErrorAction SilentlyContinue
-    if (-not $candidates) { return $null }
+    if (-not $candidates) {
+        $packageVersionCache[$cacheKey] = $null
+        return $null
+    }
     # Prefer the newest by mtime - there should only ever be one version installed anyway.
-    return ($candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
+    $version = ($candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
+    $packageVersionCache[$cacheKey] = $version
+    return $version
+}
+
+function Get-RuntimeOverlayDirectories([string]$outputDirectory) {
+    if ($runtimeOverlayDirectoryCache.ContainsKey($outputDirectory)) {
+        return @($runtimeOverlayDirectoryCache[$outputDirectory])
+    }
+    $directories = @(Get-ChildItem -Path (Join-Path $outputDirectory 'runtimes/win-*/lib/net10.0') -Directory -ErrorAction SilentlyContinue)
+    $runtimeOverlayDirectoryCache[$outputDirectory] = $directories
+    return $directories
 }
 
 # A handful of these packages (System.Windows.Extensions in particular) ship a Windows-only
@@ -91,6 +117,8 @@ function Find-DependencyVersion([hashtable]$deps, [string]$packageId) {
     return $null
 }
 
+function Invoke-PatchLibreWinFormsDeps([string]$DepsPath)
+{
 $sysformsPkgId = 'LibreWinForms.System.Windows.Forms'
 $winintPkgId = 'LibreWinForms.WindowsFormsIntegration'
 $progpudrawingPkgId = 'ProGPU.System.Drawing.Common'
@@ -286,7 +314,7 @@ if ($interopVersion) {
         Copy-Item -Force $interopDll (Join-Path $outputDir 'ProGPU.Wpf.Interop.dll')
         # LibreWPF.Transport also carries architecture-specific overlay directories. The host
         # selects one of those ahead of the root asset, so repair every Windows overlay too.
-        Get-ChildItem -Path (Join-Path $outputDir 'runtimes/win-*/lib/net10.0') -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-RuntimeOverlayDirectories $outputDir | ForEach-Object {
             Copy-Item -Force $interopDll (Join-Path $_.FullName 'ProGPU.Wpf.Interop.dll')
         }
     }
@@ -298,7 +326,7 @@ if ($interopVersion) {
 $portableCore = Join-Path $NugetPackageRoot "$($sysformsPkgId.ToLowerInvariant())/$sysformsVersion/lib/net10.0/System.Private.Windows.Core.dll"
 if (Test-Path $portableCore) {
     Copy-Item -Force $portableCore (Join-Path $outputDir 'System.Private.Windows.Core.dll')
-    Get-ChildItem -Path (Join-Path $outputDir 'runtimes/win-*/lib/net10.0') -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-RuntimeOverlayDirectories $outputDir | ForEach-Object {
         Copy-Item -Force $portableCore (Join-Path $_.FullName 'System.Private.Windows.Core.dll')
     }
 }
@@ -330,7 +358,7 @@ foreach ($packageId in $portableProGpuPackageIds) {
     Get-ChildItem -Path (Join-Path $runtimeDir '*.dll') -ErrorAction SilentlyContinue | ForEach-Object {
         $sourceDll = $_
         Copy-Item -Force $sourceDll.FullName (Join-Path $outputDir $sourceDll.Name)
-        Get-ChildItem -Path (Join-Path $outputDir 'runtimes/win-*/lib/net10.0') -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-RuntimeOverlayDirectories $outputDir | ForEach-Object {
             Copy-Item -Force $sourceDll.FullName (Join-Path $_.FullName $sourceDll.Name)
         }
     }
@@ -414,4 +442,13 @@ $summary = "patch-librewinforms-deps.ps1: patched $DepsPath ($sysformsKey"
 if ($winintKey) { $summary += ", $winintKey" }
 if ($progpudrawingKey) { $summary += ", $progpudrawingKey" }
 $summary += ')'
-Write-Host $summary
+if (-not $Quiet) { Write-Host $summary }
+}
+
+foreach ($path in $DepsPath) {
+    Invoke-PatchLibreWinFormsDeps $path
+}
+
+if ($Quiet) {
+    Write-Host "patch-librewinforms-deps.ps1: patched $($DepsPath.Count) dependency manifest(s)"
+}

@@ -52,6 +52,14 @@ param(
     # Print the phases for this platform and exit.
     [switch]$ListPhases,
 
+    # Distribution AddIns build in isolated project staging directories so their legacy shared
+    # deployment OutputPath no longer forces serial MSBuild execution.
+    [ValidateRange(1, 64)]
+    [int]$AddInMaxCpuCount = 2,
+    # The isolated staging path has a cold, whole-AddIns build validation at -m:2. Keep it on
+    # for normal distributions; callers can still use -UseAddInStaging:$false while diagnosing.
+    [switch]$UseAddInStaging = $true,
+
     # Stop anything holding the payload open before touching it. The smoke phase leaves a
     # "dotnet exec OpenDevelop.dll" process behind if it did not shut down cleanly, and the
     # out-of-process designer hosts outlive the IDE by design (SharedDesignerHostPool), so the
@@ -73,6 +81,7 @@ $patchScript = Join-Path $repoRoot 'build/patch-librewinforms-deps.ps1'
 $openAvalonRoot = Join-Path (Split-Path -Parent $repoRoot) 'openavalon'
 $windowsX64CanonicalFeed = Join-Path $openAvalonRoot 'artifacts/canonical-winforms-feed-x64'
 $windowsArm64CanonicalFeed = Join-Path $openAvalonRoot 'artifacts/canonical-winforms-feed'
+$nugetGlobalPackages = $null
 
 # The Addin SDK's OpenDevelopPruneAddinDeploymentAssets target drops runtimes/win*, linux* and
 # unix* only for the 'osx' family; on Windows those win* assets are exactly what the payload needs.
@@ -88,12 +97,17 @@ $depsJson = Join-Path $publishDir 'OpenDevelop.deps.json'
 
 function Get-NuGetGlobalPackages {
     # Needed by both the host publish and the AddIns build when they run as separate phases.
+    # A complete distribution invokes this from host, AddIns and (on Windows) designer-host
+    # phases. The cache location cannot change within this script process, so avoid starting the
+    # dotnet CLI and resolving its SDK graph more than once.
+    if ($script:nugetGlobalPackages) { return $script:nugetGlobalPackages }
     $line = & $dotnet nuget locals global-packages --list | Select-String '^global-packages: '
     if (-not $line) { throw 'dist.ps1: cannot determine the NuGet global-packages directory' }
     # A trailing directory separator escapes the closing quote when this value is forwarded to
     # the external dependency-patching script on Windows. Keep it as a canonical directory path
     # without a terminal separator.
-    return (($line.Line -replace '^global-packages:\s*', '').Trim().TrimEnd([char[]]@('\', '/')))
+    $script:nugetGlobalPackages = (($line.Line -replace '^global-packages:\s*', '').Trim().TrimEnd([char[]]@('\', '/')))
+    return $script:nugetGlobalPackages
 }
 
 function Assert-HostPublished {
@@ -108,6 +122,36 @@ function New-TempDir {
     $p = Join-Path ([System.IO.Path]::GetTempPath()) ("opendevelop-" + [System.Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $p | Out-Null
     return $p
+}
+
+function Remove-RepoGeneratedDirectory {
+    <#
+      PowerShell's Remove-Item -Recurse enumerates the AddIns deployment file-by-file. On macOS
+      that is disproportionately slow for its multi-gigabyte dependency closure. Distribution
+      still needs an empty tree (an incremental project build may otherwise leave a removed
+      package/RID asset behind), so retain the exact clean-state contract but use the native
+      recursive unlink implementation there. The relative-path check makes this intentionally
+      incapable of deleting the repository root or anything outside it.
+    #>
+    param([Parameter(Mandatory)][string]$Directory)
+
+    if (-not (Test-Path -LiteralPath $Directory)) { return }
+    $directorySeparators = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $repoFullPath = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd($directorySeparators)
+    $fullPath = [System.IO.Path]::GetFullPath($Directory).TrimEnd($directorySeparators)
+    $relativePath = [System.IO.Path]::GetRelativePath($repoFullPath, $fullPath)
+    $parentPrefix = '..' + [System.IO.Path]::DirectorySeparatorChar
+    if ($relativePath -eq '.' -or $relativePath -eq '..' -or $relativePath.StartsWith($parentPrefix, [System.StringComparison]::Ordinal) -or [System.IO.Path]::IsPathRooted($relativePath)) {
+        throw "dist.ps1: refusing to remove non-generated repository directory: $fullPath"
+    }
+
+    if ($IsWindows) {
+        Remove-Item -LiteralPath $fullPath -Recurse -Force -ErrorAction Stop
+        return
+    }
+
+    & /bin/rm -rf -- $fullPath
+    if ($LASTEXITCODE -ne 0) { throw "dist.ps1: failed to remove generated directory: $fullPath" }
 }
 
 
@@ -430,10 +474,15 @@ function Invoke-MacPayload {
     # which declares some packages (System.Windows.Extensions, ...) only under runtimes/win.
     # Without the patch the host cannot load them on macOS even though the file is present.
     $bundleAddIns = Join-Path $repoRoot 'OpenDevelop.app/Contents/MacOS/AddIns'
-    Get-ChildItem -LiteralPath $bundleAddIns -Recurse -File -Filter '*.deps.json' | Where-Object {
+    # `dotnet nuget locals global-packages --list` is process startup plus SDK resolution. All
+    # child manifests use the same cache, so resolve it once rather than repeating it for every
+    # out-of-process host manifest in the bundle.
+    $nugetPackageRoot = Get-NuGetGlobalPackages
+    $childDepsPaths = @(Get-ChildItem -LiteralPath $bundleAddIns -Recurse -File -Filter '*.deps.json' | Where-Object {
         Test-Path -LiteralPath ($_.FullName -replace '\.deps\.json$', '.runtimeconfig.json')
-    } | ForEach-Object {
-        & $patchScript $_.FullName (Get-NuGetGlobalPackages)
+    } | ForEach-Object FullName)
+    if ($childDepsPaths.Count -gt 0) {
+        & $patchScript -DepsPath $childDepsPaths -NugetPackageRoot $nugetPackageRoot -Quiet
     }
     return (Join-Path $repoRoot 'OpenDevelop.app')
 }
@@ -584,12 +633,13 @@ function Invoke-WindowsPayload {
     # Patch every staged dependency manifest, not only OpenDevelop.deps.json, so the Forms/WPF
     # designer hosts and language-service children also select the matching x64/ARM64 mixed-mode
     # LibreWPF and ProGPU runtime assemblies.
-    Get-ChildItem -LiteralPath $payloadRoot -Recurse -File -Filter '*.deps.json' | Where-Object {
+    $payloadDepsPaths = @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -File -Filter '*.deps.json' | Where-Object {
         $relative = $_.FullName.Substring($payloadRoot.Length).TrimStart('\', '/')
         $relative -eq 'OpenDevelop.deps.json' -or
         ($outOfProcessHostDirs | Where-Object { $relative.StartsWith("$_\", [System.StringComparison]::OrdinalIgnoreCase) })
-    } | ForEach-Object {
-        & $patchScript $_.FullName (Get-NuGetGlobalPackages) -WindowsX64PackageRoot $windowsX64CanonicalFeed -WindowsArm64PackageRoot $windowsArm64CanonicalFeed
+    } | ForEach-Object FullName)
+    if ($payloadDepsPaths.Count -gt 0) {
+        & $patchScript -DepsPath $payloadDepsPaths -NugetPackageRoot (Get-NuGetGlobalPackages) -WindowsX64PackageRoot $windowsX64CanonicalFeed -WindowsArm64PackageRoot $windowsArm64CanonicalFeed -Quiet
     }
 
     $appPath = Join-Path $payloadRoot 'OpenDevelop.dll'
@@ -661,7 +711,7 @@ function Invoke-HostPhase {
     # SDK-generated apphost is only the native entry point and does not bundle that runtime.
     Write-Host '==> Cleaning intermediate outputs...'
     $hostObj = Join-Path $repoRoot "src/Main/SharpDevelop/obj/$config/$tfm"
-    if (Test-Path $hostObj) { Remove-Item -Recurse -Force $hostObj }
+    Remove-RepoGeneratedDirectory $hostObj
 
     # Ensure clean state for ICSharpCode.Core.Presentation — its .g.resources (WPF theme
     # resource blob) can otherwise stale-cross from a previous build and produce a 12-byte
@@ -672,11 +722,11 @@ function Invoke-HostPhase {
     $corePres = Join-Path $repoRoot 'src/Main/ICSharpCode.Core.Presentation'
     foreach ($sub in 'obj', 'bin') {
         $dir = Join-Path $corePres $sub
-        if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+        Remove-RepoGeneratedDirectory $dir
     }
 
     Write-Host "==> Publishing framework-dependent AnyCPU app ($config)..."
-    if (Test-Path $publishDir) { Remove-Item -Recurse -Force $publishDir }
+    Remove-RepoGeneratedDirectory $publishDir
     Invoke-Native $dotnet publish $hostProject -c $config --self-contained false `
         "-p:OpenDevelopDistributionBuild=true" `
         "-p:PublishDir=$publishDir" `
@@ -703,11 +753,16 @@ function Invoke-AddInsPhase {
     $solutionText = [regex]::Replace($solutionText, '(?m)^\s*<Project Path="tests/OpenDevelop\.(?:IntegrationTests|Base\.Tests)/OpenDevelop\.[^"]+\.csproj" />\s*\r?\n', '')
     Set-Content -LiteralPath $distributionSolution -Value $solutionText -NoNewline
 
-    # Some projects write to OpenDevelopHostPublishDir while computing their distribution
-    # closure. Give that build a disposable copy so the verified host deployment remains
-    # immutable.
-    $hostPublishSnapshot = New-TempDir
-    Copy-Item -Path (Join-Path $publishDir '*') -Destination $hostPublishSnapshot -Recurse -Force
+    # Copy-local filtering only needs filename+extension matching, not a writable clone of the
+    # published host. Generate that exact file-name set once and let Directory.Build.targets read
+    # it in every add-in project. This replaces a full publish-tree copy plus a recursive glob per
+    # add-in, while keeping the verified publish output immutable.
+    $hostPublishManifestDirectory = New-TempDir
+    $hostPublishManifest = Join-Path $hostPublishManifestDirectory 'OpenDevelop.host-publish-files.txt'
+    Get-ChildItem -LiteralPath $publishDir -Recurse -File |
+        ForEach-Object { $_.Name } |
+        Sort-Object -Unique |
+        Set-Content -LiteralPath $hostPublishManifest
     try {
         # AddIns/ is an ignored deployment directory, not source. A partial or cross-platform
         # build used to leave .so/.dylib, ref/, package build props and stale assemblies here;
@@ -715,20 +770,32 @@ function Invoke-AddInsPhase {
         # them. Start every distribution build with a genuinely empty deployment root.
         Write-Host '==> Cleaning generated AddIn deployment root...'
         $generatedAddIns = Join-Path $repoRoot 'AddIns'
-        if (Test-Path $generatedAddIns) { Remove-Item -LiteralPath $generatedAddIns -Recurse -Force }
+        Remove-RepoGeneratedDirectory $generatedAddIns
         New-Item -ItemType Directory -Path $generatedAddIns | Out-Null
 
         Write-Host '==> Building distribution AddIns without shared runtime copies...'
-        Build-Solution -DotNet $dotnet -Solution $distributionSolution -Configuration $config -ExtraProperties (@(
+        $addInProperties = @(
             '-p:OpenDevelopDistributionBuild=true',
             "-p:OpenDevelopDistributionRidFamily=$ridFamily",
-            "-p:OpenDevelopHostPublishDir=$hostPublishSnapshot",
+            "-p:OpenDevelopHostPublishManifest=$hostPublishManifest",
             '-p:ProGpuWpfCopyPackageRuntimeAssets=false',
             '-p:ProGpuWpfUseCurrentRuntimeIdentifier=false'
-        ) + (Get-PinnedGitVersionProperties -GlobalAssemblyInfoPath (Join-Path $repoRoot 'src/Main/GlobalAssemblyInfo.cs')))
+        )
+        if ($UseAddInStaging) {
+            # Keep the experimental closure outside AddIns/. It must be cleaned once, before the
+            # project graph starts: cleaning a leaf in BuildDependsOn is unsafe because MSBuild
+            # can schedule another build request for that same project while a dependent is still
+            # consuming its reference assembly.
+            $stagingRoot = Join-Path $repoRoot "obj/OpenDevelopDistributionStaging/$config/"
+            Remove-RepoGeneratedDirectory $stagingRoot
+            New-Item -ItemType Directory -Path $stagingRoot | Out-Null
+            $addInProperties += "-p:OpenDevelopDistributionStagingRoot=$stagingRoot"
+            Write-Host "==> Using isolated AddIn staging: $stagingRoot"
+        }
+        Build-Solution -DotNet $dotnet -Solution $distributionSolution -Configuration $config -ExtraProperties ($addInProperties + (Get-PinnedGitVersionProperties -GlobalAssemblyInfoPath (Join-Path $repoRoot 'src/Main/GlobalAssemblyInfo.cs'))) -MaxCpuCount $AddInMaxCpuCount
     }
     finally {
-        Remove-Item -Recurse -Force $hostPublishSnapshot -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $hostPublishManifestDirectory -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $distributionSolution -Force -ErrorAction SilentlyContinue
     }
 

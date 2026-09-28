@@ -1,0 +1,51 @@
+<Project>
+  <PropertyGroup>
+    <OpenDevelopAddin>true</OpenDevelopAddin>
+    <OpenDevelopAddinKind>InProcess</OpenDevelopAddinKind>
+    <Configuration>Debug</Configuration>
+    <TestRoot>$(MSBuildThisFileDirectory)obj/sdk-staging-test/</TestRoot>
+    <OutputPath>$(TestRoot)AddIns/Sample/</OutputPath>
+    <OpenDevelopDistributionStagingRoot>$(TestRoot)staging/</OpenDevelopDistributionStagingRoot>
+    <OpenDevelopSkipAddinSdkImport>true</OpenDevelopSkipAddinSdkImport>
+    <OpenDevelopHostBin>$(TestRoot)Host/</OpenDevelopHostBin>
+    <OpenDevelopHostManifest>$(OpenDevelopHostBin)OpenDevelop.host-assemblies.txt</OpenDevelopHostManifest>
+    <OpenDevelopDistributionBuild>true</OpenDevelopDistributionBuild>
+    <OpenDevelopDistributionRidFamily>osx</OpenDevelopDistributionRidFamily>
+  </PropertyGroup>
+  <ItemGroup>
+    <OpenDevelopAddinManifest Include="$(MSBuildThisFileDirectory)Sample.addin" />
+  </ItemGroup>
+  <Import Project="$(MSBuildThisFileDirectory)../../src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.targets" />
+  <!-- This bare .proj deliberately imports the SDK directly, so it does not receive the normal
+       SDK-style Directory.Build.targets import automatically. Import the repository shim after
+       the SDK to exercise the same staging target real addin projects receive. -->
+  <Import Project="$(MSBuildThisFileDirectory)../../Directory.Build.targets" />
+  <Target Name="Build" DependsOnTargets="SeedStaleStaging;CleanStaging;OpenDevelopPrepareStagedReferenceDirectory;Prepare;OpenDevelopDeployAddinManifest;OpenDevelopTrimAddinOutput;OpenDevelopPruneAddinDeploymentAssets;OpenDevelopDeployStagedAddin;Assert" />
+  <Target Name="SeedStaleStaging">
+    <MakeDir Directories="$(OutputPath)" />
+    <WriteLinesToFile File="$(OutputPath)Removed.Package.Asset.dll" Lines="stale" Overwrite="true" />
+  </Target>
+  <Target Name="CleanStaging">
+    <!-- Distribution owns this one-time clean before the project graph starts.  Model that
+         contract here without introducing a per-project clean race into the SDK targets. -->
+    <RemoveDir Directories="$(OpenDevelopDistributionStagingRoot)" />
+  </Target>
+  <Target Name="Prepare">
+    <MakeDir Directories="$(OutputPath);$(OpenDevelopHostBin);$(OutputPath)runtimes/win-x64" />
+    <WriteLinesToFile File="$(OpenDevelopHostManifest)" Lines="Host.Shared.dll" Overwrite="true" />
+    <WriteLinesToFile File="$(OutputPath)Host.Shared.dll" Lines="duplicate" Overwrite="true" />
+    <WriteLinesToFile File="$(OutputPath)Addin.Private.dll" Lines="private" Overwrite="true" />
+    <WriteLinesToFile File="$(OutputPath)runtimes/win-x64/native.dll" Lines="foreign" Overwrite="true" />
+  </Target>
+  <Target Name="Assert">
+    <Error Condition="!Exists('$(OpenDevelopAddinDeploymentPath)Addin.Private.dll')" Text="Staged addin output was not deployed to its original AddIns path." />
+    <Error Condition="Exists('$(OpenDevelopAddinDeploymentPath)Host.Shared.dll')" Text="Host-provided DLL was copied from staging." />
+    <Error Condition="Exists('$(OpenDevelopAddinDeploymentPath)runtimes/win-x64/native.dll')" Text="Foreign runtime asset was copied from staging." />
+    <Error Condition="Exists('$(OpenDevelopAddinDeploymentPath)Removed.Package.Asset.dll')" Text="Stale staged asset was copied to the deployment path." />
+    <Error Condition="Exists('$(OpenDevelopAddinDeploymentPath)ref')" Text="Staging reference assemblies were deployed to AddIns." />
+    <Error Condition="!Exists('$(OutputPath)ref')" Text="Staging reference assemblies were pruned before dependent projects could consume them." />
+    <Error Condition="!Exists('$(OpenDevelopAddinDeploymentPath)Sample.addin')" Text="Addin manifest was not copied from staging." />
+    <Error Condition="!Exists('$(OpenDevelopAddinDeploymentManifest)')" Text="Staged deployment manifest was not written." />
+    <Message Importance="high" Text="OpenDevelop Addin SDK staging deployment test passed." />
+  </Target>
+</Project>

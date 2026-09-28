@@ -41,11 +41,12 @@ them at all.
 ## Existing infrastructure (do not duplicate)
 
 `Directory.Build.targets` already contains `RemoveHostProvidedFilesFromAddInCopyLocal`,
-used by the DISTRIBUTION flow only (`dist.ps1` passes
-`-p:OpenDevelopDistributionBuild=true -p:OpenDevelopHostPublishDir=<snapshot>`): while
-addin copy-local items are gathered, anything whose filename+extension matches the
-published app snapshot is removed. Semantics: **filename+extension match, version-blind,
-fail-open** (snapshot absent ⇒ no trim).
+used by the DISTRIBUTION flow only. `dist.ps1` writes the published host's unique filenames once
+to `OpenDevelopHostPublishManifest`; while addin copy-local items are gathered, anything whose
+filename+extension matches that manifest is removed. Semantics: **filename+extension match,
+version-blind, fail-open** (manifest absent ⇒ no trim). `OpenDevelopHostPublishDir` remains a
+compatibility fallback for callers that have only a directory, but distribution builds do not copy
+or recursively scan that directory per addin.
 
 Phase 1 reuses exactly these semantics, extended to developer builds and hardened with
 two exclusions the dist flow never needed.
@@ -134,6 +135,13 @@ needing a DIFFERENT version of a base-provided assembly silently loses it. Mitig
 the escape list in (2); plus the integration suite exercises real load paths for every
 major addin, and a mismatch surfaces immediately at AddInTree load.
 
+The SDK reads the manifest itself; it does not enumerate the host directory for each addin.
+That keeps the trim candidate set exact (a host build by-product absent from the final manifest
+cannot cause an addin-private DLL with the same name to be deleted) and avoids repeating a full
+host-closure scan across the distribution addin graph. Distribution asset pruning likewise removes
+whole `ref/` and foreign-RID runtime directories with `RemoveDir`, rather than issuing one delete
+operation per contained file.
+
 ### Why post-Build delete instead of filtering copy-local items?
 
 Filtering item lists (RAR output / `GetCopyToOutputDirectoryItems`) requires running
@@ -161,6 +169,17 @@ operating systems. Portable LibreWPF implementations are restored from `lib/net1
 child is deployed; reference-pack DLLs are not executable substitutes, and a child process cannot
 resolve them from the parent application's base directory. Cross-host assembly dedup stays out of
 scope until version unification and a shared probing path are proven.
+
+### Distribution staging and parallel builds
+
+Legacy addins use their deployment directory as `OutputPath`, so independent projects otherwise
+write into the same `AddIns/` tree and cannot safely be built in parallel. During a distribution,
+`dist.ps1` redirects ordinary in-process addins to one isolated staging directory per project,
+then deploys each pruned closure back to its declared destination. Staging retains `ref/` assemblies
+until the whole build graph completes, because they are still inputs to dependent projects; the
+deployment copy explicitly excludes them. The default distribution setting is `-m:2`; use
+`-AddInMaxCpuCount <n>` only for separately validated concurrency experiments, and
+`-UseAddInStaging:$false` only as a diagnostic escape hatch.
 
 ### Architecture: addins are AnyCPU, and the SDK enforces it
 

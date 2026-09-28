@@ -14,7 +14,15 @@ base_dir="$repo_root/src/Main/SharpDevelop/bin/${config}/net10.0-windows"
 bundle_root="$repo_root/OpenDevelop.app"
 bundle_macos="$bundle_root/Contents/MacOS"
 
-rm -rf "$bundle_root"
+if ! command -v rsync >/dev/null 2>&1; then
+  echo "build-application-bundle.sh: rsync is required to assemble an incremental bundle" >&2
+  exit 1
+fi
+
+# Do not delete and recreate the complete application bundle on every distribution iteration.
+# AddIns alone can contain several gigabytes of dependency closures. rsync --delete retains the
+# exact-payload guarantee (stale files still disappear) while reusing unchanged host, SDK, data and
+# filtered AddIn files from the previous bundle.
 mkdir -p "$bundle_root/Contents/Resources" "$bundle_macos"
 cp "$script_dir/Info.plist" "$bundle_root/Contents"
 
@@ -54,26 +62,16 @@ fi
 # first step and never escapes the bundle.
 populate_repo_payload() {
   local macos="$1"
-  cp -Rp "$repo_root/data" "$macos/data"
-  if ! command -v rsync >/dev/null 2>&1; then
-    echo "build-application-bundle.sh: rsync is required to filter AddIn dependencies" >&2
-    exit 1
-  fi
+  local exclude_file="$2"
+  rsync -a --delete "$repo_root/data/" "$macos/data/"
 
   # AddIn build outputs contain their full dependency closures. Files already
-  # supplied by the published host resolve from the application base directory,
-  # so tell rsync not to copy them into the bundle in the first place. This keeps
-  # the old basename/locale matching semantics without copying ~2 GB and then
-  # walking the bundle again to delete it.
-  local exclude_file
-  exclude_file="$(mktemp "${TMPDIR:-/tmp}/opendevelop-addin-excludes.XXXXXX")"
-  # Include every host asset type. Distribution builds already prevent new
-  # CopyLocal duplicates; this also keeps stale XML docs, satellite resources,
-  # fonts and extensionless native helpers from an old developer build out of
-  # the bundle without first copying or deleting them.
-  while IFS= read -r -d '' host_file; do
-    printf '**/%s\n' "$(basename "$host_file")" >> "$exclude_file"
-  done < <(find "$macos" -type f -print0)
+  # supplied by the published host resolve from the application base directory.
+  # The caller derives this list from *this* host publish, rather than inspecting
+  # the existing bundle: the latter also contains prior AddIns on an incremental
+  # run and would accidentally exclude the very files that need refreshing.
+  # This retains the old basename/locale matching semantics without copying ~2 GB
+  # and then walking the bundle again to delete it.
 
   # Out-of-process child deployments: folders that carry their own
   # *.runtimeconfig.json/*.deps.json and are spawned via `dotnet exec` as separate
@@ -106,6 +104,8 @@ populate_repo_payload() {
   # Their repositories deploy them into a local installed IDE for their own tests; the
   # base distribution must not carry either stale manifest or implementation.
   rsync -a \
+    --delete \
+    --delete-excluded \
     --exclude '*.pdb' \
     --exclude '**/ref/***' \
     --exclude '**/runtimes/win*/***' \
@@ -118,7 +118,6 @@ populate_repo_payload() {
     "${keep_args[@]}" \
     --exclude-from "$exclude_file" \
     "$repo_root/AddIns/" "$macos/AddIns/"
-  rm -f "$exclude_file"
 
   # XML files paired with a DLL are compiler/API documentation, not runtime
   # configuration. Preserve genuine layouts such as Decompiler/Layouts/ILSpy.xml.
@@ -136,7 +135,15 @@ if [[ ! -d "$src" ]]; then
   echo "Framework-dependent publish directory not found: $src" >&2
   exit 1
 fi
-cp -Rp "$src"/. "$bundle_macos/"
+# These payload roots have a different source and their own rsync --delete pass below. Excluding
+# them here is load-bearing: otherwise the host sync would delete the previous AddIns tree before
+# the filtered AddIns sync can compare it, turning every bundle refresh back into a full copy.
+rsync -a --delete \
+  --exclude '/AddIns/***' \
+  --exclude '/data/***' \
+  --exclude '/Sdks/***' \
+  --exclude '/SdkResolvers/***' \
+  "$src/" "$bundle_macos/"
 
 # Make the Addin SDK part of the installed IDE rather than a separately published
 # NuGet package. The resolver is built as part of SharpDevelop's project graph.
@@ -146,9 +153,9 @@ if [[ ! -d "$sdk_source" || ! -f "$resolver_source/OpenDevelop.Addin.SdkResolver
   echo "OpenDevelop Addin SDK/resolver output was not built" >&2
   exit 1
 fi
-mkdir -p "$bundle_macos/Sdks/OpenDevelop.Addin.Sdk" "$bundle_macos/SdkResolvers/OpenDevelop.Addin.SdkResolver"
-cp -Rp "$sdk_source" "$bundle_macos/Sdks/OpenDevelop.Addin.Sdk/"
-cp -p "$resolver_source"/*.dll "$bundle_macos/SdkResolvers/OpenDevelop.Addin.SdkResolver/"
+mkdir -p "$bundle_macos/Sdks/OpenDevelop.Addin.Sdk/Sdk" "$bundle_macos/SdkResolvers/OpenDevelop.Addin.SdkResolver"
+rsync -a --delete "$sdk_source/" "$bundle_macos/Sdks/OpenDevelop.Addin.Sdk/Sdk/"
+rsync -a --delete --include '*.dll' --exclude '*' "$resolver_source/" "$bundle_macos/SdkResolvers/OpenDevelop.Addin.SdkResolver/"
 cat > "$bundle_macos/SdkResolvers/OpenDevelop.Addin.SdkResolver/OpenDevelop.Addin.SdkResolver.xml" <<'EOF'
 <SdkResolver><Path>OpenDevelop.Addin.SdkResolver.dll</Path></SdkResolver>
 EOF
@@ -167,6 +174,24 @@ for name in "${win32_shims[@]}"; do
   cp -p "$shim" "$bundle_macos/$name.dll"
 done
 
-populate_repo_payload "$bundle_macos"
+# Build the AddIn filter from only current host-owned files.  Do this after the
+# shim copy, because those DLLs are also resolved from the application base
+# directory, but never derive it from bundle_macos: an existing incremental
+# bundle includes prior AddIns, data and SDK files that do not belong in this
+# ownership set.
+host_exclude_file="$(mktemp "${TMPDIR:-/tmp}/opendevelop-addin-excludes.XXXXXX")"
+trap 'rm -f "$host_exclude_file"' EXIT
+{
+  while IFS= read -r -d '' host_file; do
+    printf '**/%s\n' "$(basename "$host_file")"
+  done < <(find "$src" -type f -print0)
+  for name in "${win32_shims[@]}"; do
+    printf '**/%s.dll\n' "$name"
+  done
+} | LC_ALL=C sort -u > "$host_exclude_file"
+
+populate_repo_payload "$bundle_macos" "$host_exclude_file"
+rm -f "$host_exclude_file"
+trap - EXIT
 
 echo "Bundle ready: $bundle_root"

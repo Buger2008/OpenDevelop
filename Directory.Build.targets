@@ -7,11 +7,18 @@
   <Target Name="RemoveHostProvidedFilesFromAddInCopyLocal"
           BeforeTargets="GetCopyToOutputDirectoryItems;_CopyFilesMarkedCopyLocal"
           Condition="'$(OpenDevelopDistributionBuild)' == 'true'
-                     and '$(OpenDevelopHostPublishDir)' != ''
+                     and (Exists('$(OpenDevelopHostPublishManifest)') or '$(OpenDevelopHostPublishDir)' != '')
                      and $([System.String]::Copy('$(OutputPath)').Contains('AddIns'))">
+    <!-- dist.ps1 supplies a filename manifest from the final publish closure. This avoids copying
+         the entire host deployment to a temporary directory and then recursively globbing it once
+         for every add-in. Keep the directory glob as a compatibility fallback for callers that
+         still only provide OpenDevelopHostPublishDir. -->
+    <ReadLinesFromFile File="$(OpenDevelopHostPublishManifest)" Condition="Exists('$(OpenDevelopHostPublishManifest)')">
+      <Output TaskParameter="Lines" ItemName="_OpenDevelopHostFile" />
+    </ReadLinesFromFile>
     <ItemGroup>
       <_OpenDevelopHostFile Include="$(OpenDevelopHostPublishDir)/**/*"
-                            Condition="Exists('$(OpenDevelopHostPublishDir)')" />
+                            Condition="!Exists('$(OpenDevelopHostPublishManifest)') and Exists('$(OpenDevelopHostPublishDir)')" />
       <ReferenceCopyLocalPaths Remove="@(_OpenDevelopHostFile)"
                                MatchOnMetadata="Filename;Extension"
                                MatchOnMetadataOptions="PathLike" />
@@ -36,6 +43,25 @@
     <OpenDevelopAddinKind Condition="'$(OpenDevelopAddin)' == 'true' And '$(OpenDevelopAddinKind)' == ''">InProcessDependency</OpenDevelopAddinKind>
     <OpenDevelopAddinKind Condition="'$(OpenDevelopAddin)' == 'true' And $([System.String]::Copy('$(OutputPath)').Replace('\','/').ToLower().Contains('/host/'))">OutOfProcessHost</OpenDevelopAddinKind>
     <OpenDevelopTrimHostAssemblies Condition="'$(OpenDevelopTrimAddinCopyLocal)' != ''">$(OpenDevelopTrimAddinCopyLocal)</OpenDevelopTrimHostAssemblies>
+    <!-- Opt-in parallel-distribution prototype. Legacy addins use OutputPath as both their
+         compiler output and their shared deployment directory, which forces the solution to run
+         serially. Preserve that requested deployment directory, then redirect ordinary in-process
+         addins to an isolated per-project staging directory. A later target copies the finished,
+         already-pruned closure back to the original path. Out-of-process hosts keep their custom
+         DeployToAddIns targets for now and are deliberately excluded from this first migration. -->
+    <OpenDevelopAddinDeploymentPath Condition="'$(OpenDevelopDistributionStagingRoot)' != '' And '$(OpenDevelopDistributionBuild)' == 'true' And '$(OpenDevelopAddin)' == 'true' And '$(OpenDevelopAddinKind)' != 'OutOfProcessHost'">$(OutputPath)</OpenDevelopAddinDeploymentPath>
+    <_OpenDevelopDistributionStagingRoot Condition="'$(OpenDevelopAddinDeploymentPath)' != ''">$([MSBuild]::EnsureTrailingSlash('$(OpenDevelopDistributionStagingRoot)'))</_OpenDevelopDistributionStagingRoot>
+    <_OpenDevelopDistributionStagingManifestDirectory Condition="'$(_OpenDevelopDistributionStagingRoot)' != ''">$(_OpenDevelopDistributionStagingRoot).manifests/</_OpenDevelopDistributionStagingManifestDirectory>
+    <OpenDevelopAddinDeploymentManifest Condition="'$(_OpenDevelopDistributionStagingManifestDirectory)' != ''">$(_OpenDevelopDistributionStagingManifestDirectory)$(MSBuildProjectName).txt</OpenDevelopAddinDeploymentManifest>
+    <OutputPath Condition="'$(OpenDevelopAddinDeploymentPath)' != ''">$(_OpenDevelopDistributionStagingRoot)$(MSBuildProjectName)/</OutputPath>
+    <!-- Microsoft.Common.targets calculated these from the legacy OutputPath before this late
+         compatibility shim is imported. Redirect every output identity used by compilation and
+         CopyLocal, not only OutputPath, or an up-to-date project silently continues writing its
+         DLL beside the old AddIns deployment. -->
+    <OutDir Condition="'$(OpenDevelopAddinDeploymentPath)' != ''">$(OutputPath)</OutDir>
+    <TargetDir Condition="'$(OpenDevelopAddinDeploymentPath)' != ''">$(OutputPath)</TargetDir>
+    <TargetPath Condition="'$(OpenDevelopAddinDeploymentPath)' != ''">$(TargetDir)$(TargetFileName)</TargetPath>
+    <TargetRefPath Condition="'$(OpenDevelopAddinDeploymentPath)' != ''">$(TargetDir)ref/$(TargetFileName)</TargetRefPath>
     <!-- Out-of-process hosts are never started through their apphost. Every one of them is launched
          by DesignerHostProcessClient as "dotnet exec <host>.dll" (see GetChildDllPath), so the
          generated .exe is dead weight - and worse, it is the one file in such a project that is
@@ -60,6 +86,36 @@
                         Or '$(MSBuildProjectName)' == 'XamlLanguageServer.Wpf'
                         Or '$(MSBuildProjectName)' == 'XamlToCSharpGenerator.LanguageServer'">false</UseAppHost>
   </PropertyGroup>
+
+  <Target Name="OpenDevelopDeployStagedAddin"
+          AfterTargets="OpenDevelopPruneAddinDeploymentAssets"
+          Condition="'$(OpenDevelopAddinDeploymentPath)' != ''">
+    <ItemGroup>
+      <_OpenDevelopStagedAddinFile Include="$(OutputPath)**/*"
+                                   Exclude="$(OutputPath)ref/**/*" />
+    </ItemGroup>
+    <MakeDir Directories="$(OpenDevelopAddinDeploymentPath)" />
+    <MakeDir Directories="$(_OpenDevelopDistributionStagingManifestDirectory)" />
+    <Copy SourceFiles="@(_OpenDevelopStagedAddinFile)"
+          DestinationFiles="@(_OpenDevelopStagedAddinFile->'$(OpenDevelopAddinDeploymentPath)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <!-- The manifest records the exact relative closure that was deployed.  The current prototype
+         still performs the merge in-project; a later coordinator can consume these manifests to
+         make that merge deterministic without rescanning every staging tree. -->
+    <WriteLinesToFile File="$(OpenDevelopAddinDeploymentManifest)"
+                      Lines="@(_OpenDevelopStagedAddinFile->'%(RecursiveDir)%(Filename)%(Extension)')"
+                      Overwrite="true" />
+  </Target>
+
+  <Target Name="OpenDevelopPrepareStagedReferenceDirectory"
+          BeforeTargets="CopyFilesToOutputDirectory"
+          Condition="'$(OpenDevelopAddinDeploymentPath)' != ''">
+    <!-- CopyRefAssembly assumes TargetRefPath's parent already exists.  The legacy shared
+         AddIns directory accidentally satisfied that assumption; a new isolated staging leaf
+         does not.  This is deliberately an idempotent MakeDir, never a clean: project-reference
+         builds may overlap with consumers of the same reference assembly. -->
+    <MakeDir Directories="$(TargetDir)ref" />
+  </Target>
 
   <Target Name="OpenDevelopGenerateHostAssemblyManifest"
           AfterTargets="Build"
@@ -171,7 +227,8 @@
                       WriteOnlyWhenDifferent="true" />
   </Target>
 
-  <Import Project="$(MSBuildThisFileDirectory)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.targets" />
+  <Import Project="$(MSBuildThisFileDirectory)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.targets"
+          Condition="'$(OpenDevelopSkipAddinSdkImport)' != 'true'" />
 
   <!--
     LibreWPF builds a small native Win32-compatibility shim for portable macOS

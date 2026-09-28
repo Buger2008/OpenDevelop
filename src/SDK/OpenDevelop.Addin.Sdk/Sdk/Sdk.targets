@@ -80,9 +80,18 @@
     <Copy SourceFiles="@(OpenDevelopAddinManifest)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="OpenDevelopTrimAddinOutput" AfterTargets="OpenDevelopDeployAddinManifest;Build" Condition="'$(OpenDevelopAddin)' == 'true' And '$(OpenDevelopAddinKind)' != 'OutOfProcessHost' And '$(OpenDevelopTrimHostAssemblies)' == 'true' And '$(OpenDevelopHostBin)' != '' And Exists('$(OpenDevelopHostManifest)')">
+    <!-- The manifest is deliberately generated from the host's final TargetDir.  Do not glob
+         OpenDevelopHostBin here: distribution builds run this target for every add-in, and that
+         made every project repeatedly enumerate the complete host closure and then probe every
+         matching file in its output directory.  The manifest is both the smaller, authoritative
+         candidate set and the correct ownership boundary: a same-named private add-in DLL that
+         is not in the shipped host closure must not be removed. -->
+    <ReadLinesFromFile File="$(OpenDevelopHostManifest)">
+      <Output TaskParameter="Lines" ItemName="_OpenDevelopHostAssemblyName" />
+    </ReadLinesFromFile>
     <ItemGroup>
-      <_OpenDevelopHostAssembly Include="$(OpenDevelopHostBin)*.dll" />
-      <_OpenDevelopRedundantAssembly Include="$(OutputPath)%(_OpenDevelopHostAssembly.Filename)%(_OpenDevelopHostAssembly.Extension)" Condition="Exists('$(OutputPath)%(_OpenDevelopHostAssembly.Filename)%(_OpenDevelopHostAssembly.Extension)')" />
+      <_OpenDevelopRedundantAssembly Include="@(_OpenDevelopHostAssemblyName->'$(OutputPath)%(Identity)')" />
+      <_OpenDevelopRedundantAssembly Remove="@(_OpenDevelopRedundantAssembly)" Condition="!Exists('%(Identity)')" />
       <_OpenDevelopRedundantAssembly Remove="@(OpenDevelopAlwaysCopy)" MatchOnMetadata="Filename" />
     </ItemGroup>
     <Delete Files="@(_OpenDevelopRedundantAssembly)" />
@@ -122,7 +131,16 @@
       <_OpenDevelopDeploymentAssembly Include="$(OutputPath)**/*.dll" />
       <_OpenDevelopXmlDocumentation Include="@(_OpenDevelopDeploymentAssembly->'%(RootDir)%(Directory)%(Filename).xml')"
                                     Condition="Exists('%(Identity)')" />
-      <_OpenDevelopReferenceAsset Include="$(OutputPath)**/ref/**/*" />
+      <!-- ref/ and foreign runtime RID roots are complete subtrees that can never be useful in
+           the current distribution. Remove those directories atomically instead of handing
+           MSBuild one Delete item per file; a clean macOS distribution otherwise spends a
+           noticeable amount of time unlinking thousands of files one by one. -->
+      <!-- During an isolated parallel staging build the reference assemblies remain live build
+           inputs for projects scheduled later in the graph.  Preserve them until the coordinator
+           has finished; the staging deployment target excludes ref/**, so they never reach the
+           final AddIns tree. -->
+      <_OpenDevelopReferenceDirectory Include="$(OutputPath)ref"
+                                           Condition="Exists('$(OutputPath)ref') And '$(OpenDevelopDistributionStagingRoot)' == ''" />
       <!-- A distribution contains one OS family only. Keep Windows native payloads for both
            win-x64 and win-arm64, but never carry macOS/Linux/Unix package payloads into either
            Windows architecture. The converse preserves only the macOS family. -->
@@ -130,12 +148,17 @@
                                        Condition="'$(OpenDevelopDistributionRidFamily)' == 'osx'" />
       <_OpenDevelopForeignRuntimeAsset Include="$(OutputPath)**/runtimes/osx*/**/*;$(OutputPath)**/runtimes/linux*/**/*;$(OutputPath)**/runtimes/unix*/**/*"
                                        Condition="'$(OpenDevelopDistributionRidFamily)' == 'win'" />
+      <_OpenDevelopForeignRuntimeDirectory Include="@(_OpenDevelopForeignRuntimeAsset->'%(RootDir)%(Directory)')" />
       <_OpenDevelopForeignNativeAsset Include="$(OutputPath)**/*.dylib;$(OutputPath)**/*.so"
                                        Condition="'$(OpenDevelopDistributionRidFamily)' == 'win'" />
     </ItemGroup>
-    <Delete Files="@(_OpenDevelopXmlDocumentation);@(_OpenDevelopReferenceAsset);@(_OpenDevelopForeignRuntimeAsset);@(_OpenDevelopForeignNativeAsset)" />
+    <RemoveDuplicates Inputs="@(_OpenDevelopForeignRuntimeDirectory)">
+      <Output TaskParameter="Filtered" ItemName="_OpenDevelopForeignRuntimeDirectoryToRemove" />
+    </RemoveDuplicates>
+    <RemoveDir Directories="@(_OpenDevelopReferenceDirectory);@(_OpenDevelopForeignRuntimeDirectoryToRemove)" />
+    <Delete Files="@(_OpenDevelopXmlDocumentation);@(_OpenDevelopForeignNativeAsset)" />
     <Message Importance="normal"
-             Text="OpenDevelop Addin SDK: pruned @(_OpenDevelopXmlDocumentation->Count()) XML docs, @(_OpenDevelopReferenceAsset->Count()) reference assets, @(_OpenDevelopForeignRuntimeAsset->Count()) foreign runtime assets, and @(_OpenDevelopForeignNativeAsset->Count()) foreign native assets from $(OutputPath)."
-             Condition="@(_OpenDevelopXmlDocumentation->Count()) &gt; 0 Or @(_OpenDevelopReferenceAsset->Count()) &gt; 0 Or @(_OpenDevelopForeignRuntimeAsset->Count()) &gt; 0 Or @(_OpenDevelopForeignNativeAsset->Count()) &gt; 0" />
+             Text="OpenDevelop Addin SDK: pruned @(_OpenDevelopXmlDocumentation->Count()) XML docs, @(_OpenDevelopReferenceDirectory->Count()) reference directories, @(_OpenDevelopForeignRuntimeDirectoryToRemove->Count()) foreign runtime directories, and @(_OpenDevelopForeignNativeAsset->Count()) foreign native assets from $(OutputPath)."
+             Condition="@(_OpenDevelopXmlDocumentation->Count()) &gt; 0 Or @(_OpenDevelopReferenceDirectory->Count()) &gt; 0 Or @(_OpenDevelopForeignRuntimeDirectoryToRemove->Count()) &gt; 0 Or @(_OpenDevelopForeignNativeAsset->Count()) &gt; 0" />
   </Target>
 </Project>
