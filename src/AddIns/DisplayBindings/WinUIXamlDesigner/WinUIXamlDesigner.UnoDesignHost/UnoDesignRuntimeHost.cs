@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -666,7 +666,11 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 			var designProject = SD.ProjectService.FindProjectContainingFile(FileName.Create(documentFileName));
 			if (designProject != null)
 			{
-				var build = await DesignerBuildCoordinator.EnsureBuiltAsync(designProject, requireRuntimeGraph: true,
+				// Only the native WinUI child runs with the designed app's dependency graph (checked
+				// below). The Uno compatibility renderer just needs the output assembly, so a class
+				// library - which never gets a .runtimeconfig.json - must not look like a failed build.
+				var requireRuntimeGraph = hostDisplayName.Contains("WinUI", StringComparison.OrdinalIgnoreCase);
+				var build = await DesignerBuildCoordinator.EnsureBuiltAsync(designProject, requireRuntimeGraph,
 					report: message => { SetStatus(message); ReportDesigner(message); });
 				if (!build.IsUsable)
 				{
