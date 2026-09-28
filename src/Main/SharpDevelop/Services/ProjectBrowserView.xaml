@@ -3,38 +3,18 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:services="clr-namespace:ICSharpCode.SharpDevelop.Services"
+             xmlns:controls="clr-namespace:ICSharpCode.SharpDevelop.Controls"
              xmlns:automation="clr-namespace:System.Windows.Automation;assembly=PresentationCore">
     <UserControl.Resources>
-        <!-- One row's visuals, shared by the tree itself and the sticky header overlay below, so
-             a pinned row is pixel-identical to the real one it stands in for. -->
+        <!-- The same visual is used for real and pinned rows.  Vertical spacing belongs to this
+             template, so both representations have the identical measured pitch. -->
         <DataTemplate x:Key="ProjectBrowserNodeRow">
-            <!-- The 2px vertical margin is what separates the rows: the icons are 16px and the
-                 text is no taller, so without it the row pitch equals the icon height and every
-                 icon touches the one above it. Putting it on the shared row template rather than
-                 on TreeViewItem.Padding keeps the pinned sticky-header rows (built from this same
-                 template in code-behind) identical to the real rows they stand in for. -->
-            <StackPanel Orientation="Horizontal"
-                        Margin="0,2">
-                <Grid Width="16"
-                      Height="16"
-                      Margin="0,0,4,0">
-                    <Image Width="16"
-                           Height="16"
-                           Source="{Binding Icon}" />
-                    <!-- Badge size, not icon size. Both overlay assets are authored on a full
-                         16x16 canvas (the git badge is an ellipse centred at 8,8 with radius 7.5;
-                         Shortcut_cyanOverlay_16x is a rounded box spanning x/y 2..14), so they are
-                         scaled down here to sit in a corner. Rendered at 16x16 the link overlay
-                         covered the whole file icon instead of badging it. -->
-                    <Image Width="8"
-                           Height="8"
-                           HorizontalAlignment="Right"
-                           VerticalAlignment="Bottom"
+            <StackPanel Orientation="Horizontal" Margin="0,2">
+                <Grid Width="16" Height="16" Margin="0,0,4,0">
+                    <Image Width="16" Height="16" Source="{Binding Icon}" />
+                    <Image Width="8" Height="8" HorizontalAlignment="Right" VerticalAlignment="Bottom"
                            Source="{Binding LinkedFileOverlayIcon}" />
-                    <Image Width="8"
-                           Height="8"
-                           HorizontalAlignment="Left"
-                           VerticalAlignment="Bottom"
+                    <Image Width="8" Height="8" HorizontalAlignment="Left" VerticalAlignment="Bottom"
                            Source="{Binding SourceControlOverlayIcon}"
                            automation:AutomationProperties.AutomationId="{Binding OverlayStatusKey}" />
                 </Grid>
@@ -43,8 +23,7 @@
         </DataTemplate>
         <HierarchicalDataTemplate DataType="{x:Type services:ProjectBrowserNodeModel}"
                                   ItemsSource="{Binding Children}">
-            <ContentPresenter Content="{Binding}"
-                              ContentTemplate="{StaticResource ProjectBrowserNodeRow}" />
+            <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource ProjectBrowserNodeRow}" />
         </HierarchicalDataTemplate>
     </UserControl.Resources>
     <Grid>
@@ -52,90 +31,24 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
-        <ToolBar Grid.Row="0"
-                 ToolBarTray.IsLocked="True"
-                 KeyboardNavigation.TabNavigation="None">
-            <Button Command="{Binding ShowPropertiesCommand}"
-                    ToolTip="Properties"
-                    Padding="3">
-                <Image Width="16"
-                       Height="16"
-                       Source="{Binding PropertiesIcon}" />
-            </Button>
+        <ToolBar Grid.Row="0" ToolBarTray.IsLocked="True" KeyboardNavigation.TabNavigation="None">
+            <Button Command="{Binding ShowPropertiesCommand}" ToolTip="Properties" Padding="3"><Image Width="16" Height="16" Source="{Binding PropertiesIcon}" /></Button>
             <Separator />
-            <ToggleButton IsChecked="{Binding ShowAllFiles, Mode=TwoWay}"
-                          ToolTip="Show All Files"
-                          Padding="3">
-                <Image Width="16"
-                       Height="16"
-                       Source="{Binding ShowAllFilesIcon}" />
-            </ToggleButton>
-            <Button Command="{Binding RefreshCommand}"
-                    ToolTip="Refresh"
-                    Padding="3">
-                <Image Width="16"
-                       Height="16"
-                       Source="{Binding RefreshIcon}" />
-            </Button>
-            <Button Command="{Binding CollapseAllCommand}"
-                    ToolTip="Collapse All"
-                    Padding="3">
-                <Image Width="16"
-                       Height="16"
-                       Source="{Binding CollapseAllIcon}" />
-            </Button>
+            <ToggleButton IsChecked="{Binding ShowAllFiles, Mode=TwoWay}" ToolTip="Show All Files" Padding="3"><Image Width="16" Height="16" Source="{Binding ShowAllFilesIcon}" /></ToggleButton>
+            <Button Command="{Binding RefreshCommand}" ToolTip="Refresh" Padding="3"><Image Width="16" Height="16" Source="{Binding RefreshIcon}" /></Button>
+            <Button Command="{Binding CollapseAllCommand}" ToolTip="Collapse All" Padding="3"><Image Width="16" Height="16" Source="{Binding CollapseAllIcon}" /></Button>
         </ToolBar>
-        <TreeView x:Name="treeView"
-                  Grid.Row="1"
-                  BorderThickness="0"
-                  ScrollViewer.HorizontalScrollBarVisibility="Auto"
-                  ScrollViewer.VerticalScrollBarVisibility="Auto"
-                  ItemsSource="{Binding RootNodes}"
-                  MouseDoubleClick="TreeViewOnMouseDoubleClick"
-                  PreviewMouseRightButtonDown="TreeViewOnPreviewMouseRightButtonDown"
-                  SelectedItemChanged="TreeViewOnSelectedItemChanged">
-            <TreeView.ItemContainerStyle>
-                <Style TargetType="TreeViewItem">
-                    <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=OneWay}" />
-                </Style>
-            </TreeView.ItemContainerStyle>
-        </TreeView>
-        <!-- Sticky headers: the solution/project rows the current scroll position sits under stay
-             pinned here so the tree never scrolls to a point where you cannot tell which project
-             the visible files belong to. Opaque, so real rows scroll underneath it. Only rows
-             whose own header has already scrolled off the top are pinned (see the view's
-             UpdateStickyHeaders), which is what keeps a row from being drawn twice. -->
-        <Border x:Name="stickyHeaderPanel"
-                Grid.Row="1"
-                VerticalAlignment="Top"
-                Background="{DynamicResource ToolWindowBackground}"
-                BorderBrush="{DynamicResource Border}"
-                BorderThickness="0,0,0,1"
-                Visibility="Collapsed">
-            <!-- Rows are plain UIElements built and Margin-assigned directly in code-behind
-                 (UpdateStickyHeaders), not through an ItemTemplate: binding Margin to a per-row
-                 Thickness property here left every row unindented (Margin stayed 0 regardless of
-                 the bound value), so the reliable fix is to skip data-binding for this property
-                 and set it as a plain CLR assignment on each row's own element instead. -->
-            <ItemsControl x:Name="stickyHeaders"
-                          PreviewMouseWheel="StickyHeadersOnPreviewMouseWheel" />
-        </Border>
-        <TextBlock Grid.Row="1"
-                   Margin="12"
-                   HorizontalAlignment="Left"
-                   VerticalAlignment="Top"
-                   Foreground="{DynamicResource MutedForeground}"
-                   IsHitTestVisible="False"
-                   Text="Loading projects…">
+        <controls:StickyTreeView x:Name="treeView" Grid.Row="1"
+                                 ItemsSource="{Binding RootNodes}"
+                                 StickyHeaderTemplate="{StaticResource ProjectBrowserNodeRow}">
+            <controls:StickyTreeView.ItemContainerStyle>
+                <Style TargetType="TreeViewItem"><Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=OneWay}" /></Style>
+            </controls:StickyTreeView.ItemContainerStyle>
+        </controls:StickyTreeView>
+        <TextBlock Grid.Row="1" Margin="12" HorizontalAlignment="Left" VerticalAlignment="Top"
+                   Foreground="{DynamicResource MutedForeground}" IsHitTestVisible="False" Text="Loading projects…">
             <TextBlock.Style>
-                <Style TargetType="TextBlock">
-                    <Setter Property="Visibility" Value="Collapsed" />
-                    <Style.Triggers>
-                        <DataTrigger Binding="{Binding IsLoading}" Value="True">
-                            <Setter Property="Visibility" Value="Visible" />
-                        </DataTrigger>
-                    </Style.Triggers>
-                </Style>
+                <Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding IsLoading}" Value="True"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style>
             </TextBlock.Style>
         </TextBlock>
     </Grid>

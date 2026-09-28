@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using ICSharpCode.Core;
 using ICSharpCode.SharpDevelop.Services;
 using ICSharpCode.SharpDevelop.Project.Dialogs;
@@ -28,6 +29,45 @@ namespace ICSharpCode.SharpDevelop.DevFlow
 	[DevFlowUIThread]
 	public static class ProjectBrowserDevFlowActions
 	{
+		[DevFlowAction("od.project-browser.sticky-layout", Description = "Expand the real Projects tree if requested, optionally scroll it to a precise DIP offset, then return the measured ScrollViewer viewport, sticky overlay and each real/pinned header rectangle. Consecutive calls at the same offset are suitable for layout-stability assertions.")]
+		public static async Task<string> GetStickyLayout(double? verticalOffset = null, bool expandAll = false)
+		{
+			try {
+				var viewModel = OpenDevelopMefHost.ExportProvider.GetExportedValue<ProjectBrowserViewModel>();
+				await viewModel.WaitForCurrentRefreshAsync();
+				if (viewModel.Content is not ProjectBrowserView view)
+					return JsonSerializer.Serialize(new { success = false, error = "The Project Browser view is not realized. Show ProjectBrowserPad first." });
+
+				if (expandAll)
+					view.StickyTree.ExpandAll();
+				if (verticalOffset.HasValue)
+					view.StickyTree.ScrollToVerticalOffset(verticalOffset.Value);
+
+				// ScrollChanged schedules its recomputation at Render priority. Awaiting two render turns
+				// makes the returned snapshot a post-layout observation, not a transient scroll sample.
+				await Application.Current.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Render);
+				await Application.Current.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Render);
+				var snapshot = view.StickyTree.GetLayoutSnapshot();
+				return JsonSerializer.Serialize(new {
+					success = true,
+					verticalOffset = snapshot.VerticalOffset,
+					viewport = DescribeRect(snapshot.Viewport),
+					overlayPanel = DescribeRect(snapshot.OverlayPanel),
+					rows = snapshot.Rows.Select(row => new {
+						name = row.Name,
+						realHeader = DescribeRect(row.RealHeader),
+						overlay = DescribeRect(row.Overlay),
+						leftDelta = row.Overlay.X - row.RealHeader.X,
+						heightDelta = row.Overlay.Height - row.RealHeader.Height
+					}).ToArray()
+				});
+			} catch (Exception ex) {
+				return JsonSerializer.Serialize(new { success = false, error = ex.ToString() });
+			}
+		}
+
+		static object DescribeRect(Rect rect) => new { x = rect.X, y = rect.Y, width = rect.Width, height = rect.Height };
+
 		[DevFlowAction("od.project-browser.context-menu", Description = "Build the real context menu of the first Project Browser node of the given kind (Solution, Project, Folder, File, Reference, PackageReference), optionally matching its name, and return every visible entry with its submenus and contributing .addin")]
 		public static async Task<string> GetContextMenu(string kind, string? name = null)
 		{

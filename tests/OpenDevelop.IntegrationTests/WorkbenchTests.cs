@@ -1155,6 +1155,46 @@ public sealed class WorkbenchTests
             child.GetProperty("name").GetString() == "MainWindow.xaml.cs");
     }
 
+    [Fact]
+    public async Task ProjectBrowser_StickyHeadersAlignToTheActualScrollViewport()
+    {
+        await _app.EnsureSolutionOpenAsync(_app.SolutionExplorerFixturePath);
+        var shown = await _app.InvokeAsync("od.show-pad", "ProjectBrowserPad");
+        Assert.True(shown.GetProperty("found").GetBoolean(), "Could not show the Project Browser pad.");
+
+        // The fixture's Sticky/Level1/Level2/Level3 branch has enough descendants to force a
+        // real scroll.  The action waits for two Render turns, so these are layout observations,
+        // not a ScrollChanged-time sample.
+        var first = await _app.InvokeAsync("od.project-browser.sticky-layout", 10000d, true);
+        var second = await _app.InvokeAsync("od.project-browser.sticky-layout", 10000d, false);
+        Assert.True(first.GetProperty("success").GetBoolean(), first.ToString());
+        Assert.True(second.GetProperty("success").GetBoolean(), second.ToString());
+
+        var rows = first.GetProperty("rows").EnumerateArray().ToArray();
+        Assert.True(rows.Length >= 4, "Expected the deeply nested Sticky branch to produce multiple pinned ancestors.");
+
+        var viewport = first.GetProperty("viewport");
+        var panel = first.GetProperty("overlayPanel");
+        Assert.Equal(viewport.GetProperty("x").GetDouble(), panel.GetProperty("x").GetDouble(), 2);
+        Assert.Equal(viewport.GetProperty("y").GetDouble(), panel.GetProperty("y").GetDouble(), 2);
+
+        double expectedTop = panel.GetProperty("y").GetDouble();
+        foreach (var row in rows) {
+            Assert.Equal(0, row.GetProperty("leftDelta").GetDouble(), 2);
+            Assert.Equal(0, row.GetProperty("heightDelta").GetDouble(), 2);
+            var overlay = row.GetProperty("overlay");
+            Assert.Equal(expectedTop, overlay.GetProperty("y").GetDouble(), 2);
+            expectedTop += overlay.GetProperty("height").GetDouble();
+        }
+
+        // A pixel discrepancy is only useful as a regression when it is deterministic.  The
+        // second snapshot has the same requested (clamped) offset and must describe the same
+        // overlay geometry after another pair of render turns.
+        Assert.Equal(first.GetProperty("verticalOffset").GetDouble(), second.GetProperty("verticalOffset").GetDouble(), 2);
+        Assert.Equal(first.GetProperty("overlayPanel").GetProperty("y").GetDouble(), second.GetProperty("overlayPanel").GetProperty("y").GetDouble(), 2);
+        Assert.Equal(rows.Length, second.GetProperty("rows").GetArrayLength());
+    }
+
     static JsonElement FindNode(JsonElement node, string name)
     {
         if (node.GetProperty("name").GetString() == name)
