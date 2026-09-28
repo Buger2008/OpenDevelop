@@ -67,10 +67,10 @@
           <ComboBox x:Name="LanguageBox" Grid.Column="1" Margin="8,0,0,0" ToolTip="Choose the language for templates that provide multiple variants." SelectionChanged="OnLanguageChanged" />
         </Grid>
         <ListView x:Name="TemplateList" Grid.Row="1" SelectionMode="Single" SelectionChanged="OnSelectionChanged" Margin="0,6,0,6">
-          <ListView.ItemTemplate><DataTemplate><StackPanel><TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" /><TextBlock Text="{Binding Description}" Foreground="Gray" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" /></StackPanel></DataTemplate></ListView.ItemTemplate>
+          <ListView.ItemTemplate><DataTemplate><StackPanel><TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" /><TextBlock Text="{Binding Description}" Foreground="{DynamicResource MutedForeground}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" /></StackPanel></DataTemplate></ListView.ItemTemplate>
         </ListView>
         <Border Grid.Row="2" BorderBrush="Gray" BorderThickness="1" Padding="7">
-          <StackPanel><TextBlock x:Name="TemplateTitleText" FontWeight="SemiBold" /><TextBlock x:Name="TemplateDescriptionText" TextWrapping="Wrap" Foreground="Gray" /><TextBlock x:Name="TemplateDetailsText" Margin="0,4,0,0" Foreground="Gray" /></StackPanel>
+          <StackPanel><TextBlock x:Name="TemplateTitleText" FontWeight="SemiBold" /><TextBlock x:Name="TemplateDescriptionText" TextWrapping="Wrap" Foreground="{DynamicResource MutedForeground}" /><TextBlock x:Name="TemplateDetailsText" Margin="0,4,0,0" Foreground="{DynamicResource MutedForeground}" /></StackPanel>
         </Border>
       </Grid>
     </Grid>
@@ -91,12 +91,12 @@
 
     <TextBlock x:Name="StatusText"
                Grid.Row="7"
-               Foreground="Gray"
+               Foreground="{DynamicResource MutedForeground}"
                Margin="0,0,0,8" />
 
     <TextBlock x:Name="CreatePathText"
                Grid.Row="8"
-               Foreground="Gray"
+               Foreground="{DynamicResource MutedForeground}"
                TextTrimming="CharacterEllipsis"
                ToolTip="The directory in which the selected template will be created."
                Margin="0,0,0,8" />

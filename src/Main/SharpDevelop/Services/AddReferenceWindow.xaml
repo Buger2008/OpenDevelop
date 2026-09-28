@@ -21,7 +21,7 @@
                 <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}" Checked="OnSelectionChanged" Unchecked="OnSelectionChanged">
                   <StackPanel>
                     <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding Path}" Foreground="Gray"
+                    <TextBlock Text="{Binding Path}" Foreground="{DynamicResource MutedForeground}"
                                TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                   </StackPanel>
                 </CheckBox>
@@ -30,7 +30,7 @@
           </ListBox>
           <TextBlock x:Name="NoProjectsText"
                      Text="No other projects in this solution can be referenced."
-                     Foreground="Gray"
+                     Foreground="{DynamicResource MutedForeground}"
                      HorizontalAlignment="Center" VerticalAlignment="Center"
                      Visibility="Collapsed" />
         </Grid>
@@ -53,7 +53,7 @@
 
     <TextBlock x:Name="StatusText"
                Grid.Row="1"
-               Foreground="Gray"
+               Foreground="{DynamicResource MutedForeground}"
                Margin="0,0,0,8" />
 
     <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">

@@ -39,13 +39,13 @@
         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
         <TextBox x:Name="SearchBox" ToolTip="Search template name, short name, description, or tags." TextChanged="OnSearchChanged" />
         <ListView x:Name="TemplateList" Grid.Row="1" SelectionMode="Single" SelectionChanged="OnSelectionChanged" Margin="0,6,0,6">
-          <ListView.ItemTemplate><DataTemplate><StackPanel><TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" /><TextBlock Text="{Binding Description}" Foreground="Gray" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" /></StackPanel></DataTemplate></ListView.ItemTemplate>
+          <ListView.ItemTemplate><DataTemplate><StackPanel><TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" /><TextBlock Text="{Binding Description}" Foreground="{DynamicResource MutedForeground}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" /></StackPanel></DataTemplate></ListView.ItemTemplate>
         </ListView>
-        <Border Grid.Row="2" BorderBrush="Gray" BorderThickness="1" Padding="7"><StackPanel><TextBlock x:Name="TemplateTitleText" FontWeight="SemiBold" /><TextBlock x:Name="TemplateDescriptionText" TextWrapping="Wrap" Foreground="Gray" /><TextBlock x:Name="TemplateDetailsText" Margin="0,4,0,0" Foreground="Gray" /></StackPanel></Border>
+        <Border Grid.Row="2" BorderBrush="Gray" BorderThickness="1" Padding="7"><StackPanel><TextBlock x:Name="TemplateTitleText" FontWeight="SemiBold" /><TextBlock x:Name="TemplateDescriptionText" TextWrapping="Wrap" Foreground="{DynamicResource MutedForeground}" /><TextBlock x:Name="TemplateDetailsText" Margin="0,4,0,0" Foreground="{DynamicResource MutedForeground}" /></StackPanel></Border>
       </Grid>
     </Grid>
 
-    <TextBlock x:Name="CreatePathText" Grid.Row="2" Foreground="Gray"
+    <TextBlock x:Name="CreatePathText" Grid.Row="2" Foreground="{DynamicResource MutedForeground}"
                TextTrimming="CharacterEllipsis" Margin="0,0,0,4" />
     <StackPanel Grid.Row="3" Margin="0,0,0,6">
       <Label Content="Template options:" Target="{Binding ElementName=TemplateOptionsPanel}" Padding="0,0,0,3" />
@@ -64,7 +64,7 @@
 
     <TextBlock x:Name="StatusText"
                Grid.Row="5"
-               Foreground="Gray"
+               Foreground="{DynamicResource MutedForeground}"
                Margin="0,0,0,8" />
 
     <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right">

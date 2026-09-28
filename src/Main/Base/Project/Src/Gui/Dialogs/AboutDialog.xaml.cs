@@ -47,7 +47,8 @@ namespace ICSharpCode.SharpDevelop.Gui
 			var copyrightAttr = (AssemblyCopyrightAttribute)assembly
 				.GetCustomAttributes(typeof(AssemblyCopyrightAttribute), false)
 				.FirstOrDefault();
-			CopyrightText.Text = "Copyright " + (copyrightAttr?.Copyright ?? "");
+			CopyrightText.Text = "Copyright " + (copyrightAttr?.Copyright ?? "")
+				+ Environment.NewLine + "Copyright © 2026 LeXtudio Inc.";
 
 			VersionInfoBox.Text = BuildVersionInformation(assembly, fileVersion);
 			AssemblyList.ItemsSource = LoadAssemblyList();
@@ -105,9 +106,12 @@ namespace ICSharpCode.SharpDevelop.Gui
 				TextWrapping = TextWrapping.Wrap,
 				FontSize = 11,
 				FontFamily = new FontFamily("Segoe UI"),
-				Foreground = Brushes.Black,
 				Width = quoteCanvas.ActualWidth - 10
 			};
+			// This canvas has ToolWindowBackground, which is near-black in the dark theme.
+			// A dynamic resource keeps newly created quote text readable and updates it if the
+			// user changes the IDE theme while this dialog is open.
+			tb.SetResourceReference(TextBlock.ForegroundProperty, "Foreground");
 
 			Canvas.SetLeft(tb, 5);
 			Canvas.SetTop(tb, scrollY);
