@@ -55,6 +55,35 @@ display toggles, Class Browser integration for the debuggee's loaded modules,
 and the ObjectGraph visualizer (no live-object identity/cycle data over DAP).
 The rest of this document is kept for historical background.
 
+## SharpDbg visualizers and regression coverage
+
+The WPF Debugger add-in retains three DAP-backed visualizers:
+
+- **Text visualizer** for a non-empty scalar value.
+- **XML visualizer** for a scalar whose adapter-rendered value begins with XML
+  (the opening/closing DAP string quotes are removed before it is shown with XML
+  syntax highlighting).
+- **Collection visualizer** for any DAP variable with a
+  `variablesReference`; it shows the adapter's immediate children as Name,
+  Value and Type rows. DAP cannot reliably distinguish a collection from an
+  arbitrary expandable object, so this availability rule is deliberately broad.
+
+`ObjectGraphVisualizer` is intentionally not compiled or registered. The old
+implementation depended on ICorDebug object identity/address information to
+walk cycles; standard DAP, including SharpDbg, does not expose an equivalent.
+It must remain documented as unsupported unless SharpDbg gains an explicit
+extension that provides stable object identity.
+
+`DebuggerIntegrationTests.SharpDbgVisualizers_OfferAndRenderTextXmlAndCollectionValues`
+is the end-to-end regression test. It starts the real bundled SharpDbg adapter,
+stops `DebugTestApp` at a deterministic breakpoint, obtains the real
+`ValueNode.VisualizerCommands`, and invokes the production command for each
+visualizer. The DevFlow probe schedules inspection while the command's real
+`ShowDialog()` modal loop is running, records the actual WPF window content,
+then closes it. It asserts text content, XML syntax highlighting, and the two
+DAP collection rows; this prevents an `evaluate`-only test from being mistaken
+for visualizer coverage.
+
 OpenDevelop should not port the SharpDevelop debugger engine as-is. The old
 SharpDevelop addin is useful as a workbench integration reference, but its engine
 is a Windows-era managed debugger built around CorDebug wrappers and WinForms UI.

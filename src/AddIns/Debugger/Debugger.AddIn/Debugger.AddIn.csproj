@@ -30,6 +30,9 @@
     <ProjectReference Include="..\..\..\Main\ICSharpCode.Core.Presentation\ICSharpCode.Core.Presentation.csproj" Private="false" />
     <ProjectReference Include="..\..\..\Main\ICSharpCode.Core.WinForms\ICSharpCode.Core.WinForms.csproj" Private="false" />
     <ProjectReference Include="..\..\..\Main\ICSharpCode.SharpDevelop.Widgets\Project\ICSharpCode.SharpDevelop.Widgets.csproj" Private="false" />
+    <!-- Lets the loaded debugger add-in expose narrow, production-path DevFlow probes for
+         integration tests. The probes are discovered after the add-in itself is loaded. -->
+    <PackageReference Include="LeXtudio.DevFlow.Agent.Core" />
   </ItemGroup>
 
   <ItemGroup>

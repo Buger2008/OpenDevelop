@@ -194,6 +194,52 @@ public sealed class DebuggerIntegrationTests
     }
 
     [Fact]
+    public async Task SharpDbgVisualizers_OfferAndRenderTextXmlAndCollectionValues()
+    {
+        var program = ProgramPath;
+        var breakpointLine = FindLine(program, "var message = ComputeGreeting(\"World\");");
+
+        await _app.InvokeAsync("od.open-solution", _app.DebugTestProjectPath);
+        await _app.InvokeAsync("od.open-file", program);
+        await _app.InvokeAsync("od.debug.clear-breakpoints");
+        var breakpoint = await _app.InvokeAsync("od.debug.set-breakpoint", program, breakpointLine);
+        Assert.True(breakpoint.GetProperty("success").GetBoolean(), breakpoint.ToString());
+
+        try
+        {
+            var start = await _app.InvokeAsync("od.debug.start", _app.DebugTestProjectPath, true, 45);
+            Assert.True(start.GetProperty("stopped").GetBoolean(), start.ToString());
+
+            var text = await _app.InvokeAsync("od.debug.visualizer.inspect", "greeting", "Text visualizer");
+            Assert.True(text.GetProperty("success").GetBoolean(), text.ToString());
+            Assert.Contains("Text visualizer", text.GetProperty("availableVisualizers").EnumerateArray().Select(x => x.GetString()));
+            Assert.Equal("greeting", text.GetProperty("title").GetString());
+            Assert.Contains("Hello, Debugger!", text.GetProperty("text").GetString());
+
+            var xml = await _app.InvokeAsync("od.debug.visualizer.inspect", "xml", "XML visualizer");
+            Assert.True(xml.GetProperty("success").GetBoolean(), xml.ToString());
+            Assert.Contains("Text visualizer", xml.GetProperty("availableVisualizers").EnumerateArray().Select(x => x.GetString()));
+            Assert.Contains("XML visualizer", xml.GetProperty("availableVisualizers").EnumerateArray().Select(x => x.GetString()));
+            Assert.Equal("xml", xml.GetProperty("title").GetString());
+            Assert.Contains("<root><item>visualizer</item></root>", xml.GetProperty("text").GetString());
+            Assert.Contains("XML", xml.GetProperty("highlighting").GetString(), StringComparison.OrdinalIgnoreCase);
+
+            var grid = await _app.InvokeAsync("od.debug.visualizer.inspect", "numbers", "Collection visualizer");
+            Assert.True(grid.GetProperty("success").GetBoolean(), grid.ToString());
+            Assert.Equal(new[] { "Collection visualizer" }, grid.GetProperty("availableVisualizers").EnumerateArray().Select(x => x.GetString()));
+            Assert.Equal("numbers", grid.GetProperty("title").GetString());
+            Assert.Contains(grid.GetProperty("rows").EnumerateArray(), row =>
+                row.GetProperty("Name").GetString() == "[0]" && row.GetProperty("Value").GetString()!.Contains("7"));
+            Assert.Contains(grid.GetProperty("rows").EnumerateArray(), row =>
+                row.GetProperty("Name").GetString() == "[1]" && row.GetProperty("Value").GetString()!.Contains("11"));
+        }
+        finally
+        {
+            await _app.InvokeAsync("od.debug.stop");
+        }
+    }
+
+    [Fact]
     public async Task StepIntoAndStepOver_UpdateCurrentFrameAndLocals()
     {
         var program = ProgramPath;
