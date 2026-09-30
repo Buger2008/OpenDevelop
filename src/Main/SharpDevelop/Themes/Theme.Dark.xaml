@@ -25,18 +25,10 @@
          #4B4B53 dots merged into #2A2A2E after DPI scaling/anti-aliasing and the edge read as a
          flat fill. A 1.75px #707078 dot preserves the quiet pattern while keeping the page edge
          visible at normal zoom. -->
-    <DrawingBrush x:Key="EdgePattern" TileMode="Tile" Viewport="0,0,16,16" ViewportUnits="Absolute">
-      <DrawingBrush.Drawing>
-        <DrawingGroup>
-          <GeometryDrawing Brush="#FF2A2A2E"><GeometryDrawing.Geometry><RectangleGeometry Rect="0,0,16,16"/></GeometryDrawing.Geometry></GeometryDrawing>
-          <GeometryDrawing Brush="#FF707078">
-            <GeometryDrawing.Geometry>
-              <EllipseGeometry Center="1.5,1.5" RadiusX="1.75" RadiusY="1.75" />
-            </GeometryDrawing.Geometry>
-          </GeometryDrawing>
-        </DrawingGroup>
-      </DrawingBrush.Drawing>
-    </DrawingBrush>
+<!-- Drawn by DotGridBackdrop (a dot every 16px) rather than as a DrawingBrush: LibreWPF paints
+         no TileBrush background, tiled or not. EdgePatternBackground is the fill, EdgePatternDot the dots. -->
+    <SolidColorBrush x:Key="EdgePatternBackground" Color="#FF2A2A2E" />
+    <SolidColorBrush x:Key="EdgePatternDot" Color="#FF707078" />
     <SolidColorBrush x:Key="Selection" Color="#FF007ACC" />
     <SolidColorBrush x:Key="SelectionForeground" Color="#FFFFFFFF" />
     <SolidColorBrush x:Key="HoverBackground" Color="#FF3E3E42" />

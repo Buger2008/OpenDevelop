@@ -149,9 +149,12 @@ namespace ICSharpCode.SharpDevelop.DevFlow
 				if (menuItem == null)
 					return JsonSerializer.Serialize(new { success = false, error = "Project Options menu item is unavailable." });
 
-				// Raise the same Click event WPF raises for the right-click popup. Unlike od.menu.invoke,
-				// this resolves the class= attribute through this add-in's Runtime imports.
-				menuItem.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+				// Click it the way WPF does for the right-click popup: MenuItem.OnClick raises Click AND
+				// executes the item's Command. Raising ClickEvent alone runs only Click handlers, so the
+				// codon's command (ViewProjectOptions) never ran. Unlike od.menu.invoke, this resolves
+				// the class= attribute through this add-in's Runtime imports.
+				typeof(MenuItem).GetMethod("OnClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+					.Invoke(menuItem, null);
 				await Application.Current.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
 				var project = SD.ProjectService.CurrentProject;
 				var options = SD.Workbench.ViewContentCollection.OfType<ProjectOptionsView>()

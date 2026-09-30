@@ -1,0 +1,27 @@
+<Project Sdk="LibreWPF.Sdk">
+  <!-- The shared design canvas every UI framework's designer depends on: the surface (toolbar,
+       viewport, frame, selection, gestures, overlays) and its backend-neutral controller. A UI
+       addin declares <Dependency addin="ICSharpCode.DesignerCanvas"/>, imports
+       $ICSharpCode.DesignerCanvas/ICSharpCode.DesignerCanvas.dll, references this project with
+       Private="false", and supplies only an IDesignCanvasBackend.
+       See doc/technotes/designer-canvas-addin.md. -->
+  <PropertyGroup>
+    <OpenDevelopAddin>true</OpenDevelopAddin>
+    <OpenDevelopAddinKind>InProcess</OpenDevelopAddinKind>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>ICSharpCode.SharpDevelop.Designer.Surface</RootNamespace>
+    <AssemblyName>ICSharpCode.DesignerCanvas</AssemblyName>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <OutputType>Library</OutputType>
+    <OutputPath>..\..\..\..\AddIns\DisplayBindings\DesignerCanvas\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\Main\Base\Project\ICSharpCode.SharpDevelop.csproj" Private="false" />
+    <ProjectReference Include="..\..\..\Main\Core\Project\ICSharpCode.Core.csproj" Private="false" />
+    <ProjectReference Include="..\..\..\Main\Designer\Designer.Presentation\Designer.Presentation.csproj" />
+    <ProjectReference Include="..\..\..\Main\Designer\Designer.Remote\Designer.Remote.csproj" Private="false" />
+  </ItemGroup>
+  <ItemGroup><None Include="DesignerCanvas.addin" /></ItemGroup>
+</Project>

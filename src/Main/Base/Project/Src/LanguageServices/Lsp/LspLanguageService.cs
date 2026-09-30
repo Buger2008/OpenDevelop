@@ -51,7 +51,8 @@ namespace ICSharpCode.SharpDevelop.LanguageServices.Lsp
 
         Process? _process;
         JsonRpc? _rpc;
-        bool _unavailable;
+        volatile bool _unavailable;
+        int _disposed;
 		string[] _semanticTokenTypes = Array.Empty<string>();
 
         public LspLanguageService(LspServerLaunchSpec spec, string rootUri)
@@ -60,13 +61,24 @@ namespace ICSharpCode.SharpDevelop.LanguageServices.Lsp
             _rootUri = rootUri ?? throw new ArgumentNullException(nameof(rootUri));
         }
 
+        /// <summary>
+        /// Stops the server. Safe to call more than once. The instance stays callable afterwards and
+        /// simply reports itself unavailable: <see cref="LspServiceManager"/> releases servers on
+        /// solution close while a caller may still hold this instance, and that caller must get "no
+        /// language service", not an exception.
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+            _unavailable = true;
             if (_rpc is not null)
             {
                 try
                 {
-                    await _rpc.InvokeAsync("shutdown");
+                    // A wedged server must not hold up the solution close that released it.
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    await _rpc.InvokeWithCancellationAsync("shutdown", null, timeout.Token);
                     await _rpc.NotifyAsync("exit");
                 }
                 catch
@@ -90,8 +102,8 @@ namespace ICSharpCode.SharpDevelop.LanguageServices.Lsp
             }
 
             _process?.Dispose();
-            _startGate.Dispose();
-            _documentGate.Dispose();
+            // The gates are deliberately not disposed: a caller still holding this instance may be
+            // waiting on one, and SemaphoreSlim needs no disposal unless its wait handle was used.
         }
 
         public async Task UpsertDocumentAsync(DocumentId documentId, string text, CancellationToken cancellationToken)

@@ -1,0 +1,7 @@
+<AddIn name="Designer Canvas" author="LeXtudio" description="The shared design surface used by every UI framework's visual designer." addInManagerHidden="preinstalled">
+  <Manifest><Identity name="ICSharpCode.DesignerCanvas" /></Manifest>
+  <Runtime>
+    <Import assembly="ICSharpCode.DesignerCanvas.dll" />
+    <Import assembly="ICSharpCode.Designer.Presentation.dll" />
+  </Runtime>
+</AddIn>

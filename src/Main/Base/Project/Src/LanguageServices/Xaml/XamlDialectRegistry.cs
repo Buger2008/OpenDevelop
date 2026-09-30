@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -48,6 +48,11 @@ public sealed class XamlDialectRegistration
 	/// <see cref="XamlDesignerHostSelector"/>. Null when the designer has no separate host.</summary>
 	public string? HostAssemblyName { get; }
 
+	/// <summary>The Toolbox pad content for this dialect's files in the XAML SOURCE editor, or null
+	/// to leave the built-in choice alone. Without it the Source tab of an out-of-tree dialect's
+	/// file showed the WPF toolbox, so a drag onto the markup inserted a WPF control.</summary>
+	public Func<object?>? ToolsContent { get; init; }
+
 	public XamlDialectRegistration(string dialect, Func<string, bool> matches, string? hostAssemblyName = null)
 	{
 		if (string.IsNullOrWhiteSpace(dialect)) throw new ArgumentException("A dialect key is required.", nameof(dialect));
@@ -61,6 +66,42 @@ public sealed class XamlDialectRegistration
 public static class XamlDialectRegistry
 {
 	static readonly List<XamlDialectRegistration> registrations = new();
+	static readonly Dictionary<string, Func<object?>> builtInToolsContent = new(StringComparer.OrdinalIgnoreCase);
+
+	/// <summary>
+	/// Registers the source-editor Toolbox of a BUILT-IN dialect (<see cref="XamlDialectKeys"/>).
+	/// Kept apart from <see cref="Register"/> on purpose: it changes no dialect matching, it only
+	/// lets the owning designer addin supply its toolbox at autostart so the XAML editor needs no
+	/// compile-time reference to that addin (which used to copy the designer - and the shared
+	/// canvas it imports - privately into every addin that references the editor).
+	/// </summary>
+	public static void RegisterBuiltInToolsContent(string dialect, Func<object?> provider)
+	{
+		if (string.IsNullOrWhiteSpace(dialect)) throw new ArgumentException("A dialect key is required.", nameof(dialect));
+		if (provider == null) throw new ArgumentNullException(nameof(provider));
+		lock (registrations) builtInToolsContent[dialect] = provider;
+	}
+
+	/// <summary>The Toolbox a built-in dialect's addin registered for <paramref name="xamlFileName"/>.
+	/// A file no dialect claims gets the WPF one, as it always has. Null when that addin is absent.</summary>
+	public static object? GetBuiltInToolsContent(string xamlFileName)
+	{
+		if (string.IsNullOrEmpty(xamlFileName)) return null;
+		var dialect = BuiltInDialect(xamlFileName) ?? XamlDialectKeys.Wpf;
+		Func<object?>? provider;
+		lock (registrations)
+		{
+			if (!builtInToolsContent.TryGetValue(dialect, out provider)) return null;
+		}
+		try
+		{
+			return provider();
+		}
+		catch (Exception)
+		{
+			return null;
+		}
+	}
 
 	/// <summary>
 	/// Registers a dialect. An addin calls this once while it initialises; the workbench and
@@ -120,6 +161,34 @@ public static class XamlDialectRegistry
 		}
 
 		return BuiltInDialect(xamlFileName);
+	}
+
+	/// <summary>The Toolbox content a REGISTERED dialect provides for <paramref name="xamlFileName"/>'s
+	/// source editor, or null (built-in dialects, unclaimed files, or no provider). A throwing
+	/// provider degrades to null, like a throwing matcher.</summary>
+	public static object? GetToolsContent(string xamlFileName)
+	{
+		if (string.IsNullOrEmpty(xamlFileName)) return null;
+		XamlDialectRegistration[] snapshot;
+		lock (registrations)
+		{
+			snapshot = registrations.ToArray();
+		}
+
+		foreach (XamlDialectRegistration registration in snapshot)
+		{
+			try
+			{
+				if (registration.ToolsContent != null && registration.Matches(xamlFileName))
+					return registration.ToolsContent();
+			}
+			catch (Exception)
+			{
+				// An out-of-tree provider must not take the Toolbox pad down.
+			}
+		}
+
+		return null;
 	}
 
 	/// <summary>The host assembly a registered dialect asked for, or null.</summary>

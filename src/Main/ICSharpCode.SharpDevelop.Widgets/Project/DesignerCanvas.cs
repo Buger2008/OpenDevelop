@@ -225,8 +225,19 @@ namespace ICSharpCode.SharpDevelop.Widgets
 			// `this` was a silent no-op - the resource resolved fine, nothing ever painted it. A
 			// Panel's own Background (Grid included) is drawn directly by the panel itself, template
 			// or not, which is why moving the same reference here actually shows the pattern.
-			root.SetResourceReference(Panel.BackgroundProperty, "EdgePattern");
+			//
+			// The dots themselves are drawn by DotGridBackdrop in the content row, behind ContentHost:
+			// LibreWPF paints no TileBrush background (DrawingBrush or ImageBrush, tiled or not), so
+			// the EdgePattern DrawingBrush this used to set here left the document pane's flat
+			// background showing in both themes.
+			root.SetResourceReference(Panel.BackgroundProperty, "EdgePatternBackground");
+			backdrop.SetResourceReference(DotGridBackdrop.BackgroundProperty, "EdgePatternBackground");
+			backdrop.SetResourceReference(DotGridBackdrop.DotBrushProperty, "EdgePatternDot");
+			Grid.SetRow(backdrop, 1);
+			root.Children.Insert(0, backdrop);
 		}
+
+		readonly DotGridBackdrop backdrop = new DotGridBackdrop();
 
 		/// <summary>Where the backend mounts its rendered surface (frame + selection + gestures).</summary>
 		public ContentControl ContentHost { get; } = new ContentControl();

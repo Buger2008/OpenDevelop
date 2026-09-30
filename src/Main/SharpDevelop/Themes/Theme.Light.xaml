@@ -40,20 +40,10 @@
          a soft dot grid (Blend/Photoshop-canvas style), less busy than the earlier crosshatch
          lines, which visually competed with the page's own content whenever a design frame's edge
          didn't line up cleanly on a tile boundary. -->
-    <DrawingBrush x:Key="EdgePattern" TileMode="Tile" Viewport="0,0,16,16" ViewportUnits="Absolute">
-      <DrawingBrush.Drawing>
-        <DrawingGroup>
-          <GeometryDrawing Brush="#FFF3F3F3"><GeometryDrawing.Geometry><RectangleGeometry Rect="0,0,16,16"/></GeometryDrawing.Geometry></GeometryDrawing>
-          <GeometryDrawing Brush="#FFC2C2C2">
-            <GeometryDrawing.Geometry>
-              <!-- A hairline 1px dot vanished under anti-aliasing in the previous attempt at this
-                   (see Theme.Dark.xaml's own note); 1.4px keeps it visible without reading as busy. -->
-              <EllipseGeometry Center="1,1" RadiusX="1.4" RadiusY="1.4" />
-            </GeometryDrawing.Geometry>
-          </GeometryDrawing>
-        </DrawingGroup>
-      </DrawingBrush.Drawing>
-    </DrawingBrush>
+<!-- Drawn by DotGridBackdrop (a dot every 16px) rather than as a DrawingBrush: LibreWPF paints
+         no TileBrush background, tiled or not. EdgePatternBackground is the fill, EdgePatternDot the dots. -->
+    <SolidColorBrush x:Key="EdgePatternBackground" Color="#FFF3F3F3" />
+    <SolidColorBrush x:Key="EdgePatternDot" Color="#FFC2C2C2" />
     <SolidColorBrush x:Key="Selection" Color="#FF3399FF" />
     <SolidColorBrush x:Key="SelectionForeground" Color="#FFFFFFFF" />
     <SolidColorBrush x:Key="HoverBackground" Color="#FFE8E8E8" />

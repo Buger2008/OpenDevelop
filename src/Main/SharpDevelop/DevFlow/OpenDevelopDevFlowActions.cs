@@ -193,6 +193,9 @@ namespace ICSharpCode.SharpDevelop.DevFlow
 		// These thin stubs forward every od.forms-designer.* action via reflection,
 		// exactly like the original two stubs above.
 
+		[DevFlowAction("od.forms-designer.view", Description = "Set the WinForms design surface view (fit or an absolute zoom)")]
+		public static string FormsDesignerView(string value) => InvokeFormsDesignerDevFlowAction("SetView", value);
+
 		[DevFlowAction("od.forms-designer.surface-geometry", Description = "Report the WinForms design surface geometry")]
 		public static string FormsDesignerSurfaceGeometry() => InvokeFormsDesignerDevFlowAction("GetSurfaceGeometry");
 
@@ -1762,6 +1765,10 @@ namespace ICSharpCode.SharpDevelop.DevFlow
 				return JsonSerializer.Serialize(new { count = 0, error = ex.Message });
 			}
 		}
+
+		[DevFlowAction("od.lsp.server-count", Description = "How many LSP language servers the IDE currently holds (one per language, command line and workspace root); a server is released when the solution its workspace belongs to closes")]
+		public static string GetLspServerCount()
+			=> JsonSerializer.Serialize(new { success = true, count = ICSharpCode.SharpDevelop.LanguageServices.Lsp.LspServiceManager.ServiceCount });
 
 		[DevFlowAction("od.completions", Description = "Get IntelliSense completions at file:line/column")]
 		public static async Task<string> GetCompletionsAsync(string fileName, int line, int column)

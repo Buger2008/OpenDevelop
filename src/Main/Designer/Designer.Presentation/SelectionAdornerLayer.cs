@@ -53,6 +53,11 @@ namespace ICSharpCode.SharpDevelop.Designer.Presentation
 			}
 		}
 
+		/// <summary>Whether the resize handles are shown and hit-tested. Off for a framework whose
+		/// layout owns every element's size and position (GTK), where a handle would promise a
+		/// resize the design cannot make.</summary>
+		public bool ShowHandles { get; set; } = true;
+
 		/// <param name="handleNames">Which named handles this instance shows - WinUI passes all
 		/// eight ("nw","n","ne","e","se","s","sw","w"); WinForms passes just <c>["se"]</c>.</param>
 		/// <param name="showLabel">Whether a name label is shown above the selection (WinUI:
@@ -210,7 +215,7 @@ namespace ICSharpCode.SharpDevelop.Designer.Presentation
 				var (sx, sy) = viewport.DesignToSurface(hx, hy);
 				Canvas.SetLeft(handle, sx - HandleSize / 2);
 				Canvas.SetTop(handle, sy - HandleSize / 2);
-				handle.Visibility = Visibility.Visible;
+				handle.Visibility = ShowHandles ? Visibility.Visible : Visibility.Collapsed;
 			}
 		}
 
@@ -235,7 +240,7 @@ namespace ICSharpCode.SharpDevelop.Designer.Presentation
 		/// "center third is always a move" logic as UnoDesignSurfaceControl.HandleAt today.</summary>
 		public string? HandleAt(Point designPoint, DesignViewport viewport)
 		{
-			if (designSelection.IsEmpty || string.IsNullOrEmpty(selectionName))
+			if (!ShowHandles || designSelection.IsEmpty || string.IsNullOrEmpty(selectionName))
 				return null;
 			var scale = viewport.Scale;
 			var tolerance = (HandleSize / 2 + 2) / scale;
