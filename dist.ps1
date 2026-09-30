@@ -693,7 +693,11 @@ function Invoke-WindowsPayload {
         'DisplayBindings\WinUIXamlDesigner\MicrosoftHost',
         'DisplayBindings\WpfDesign\Host',
         'DisplayBindings\WpfDesign\MicrosoftHost',
-        'LanguageServices\XamlLanguageServer.Wpf'
+        'LanguageServices\XamlLanguageServer.Wpf',
+        'LanguageServices\WinUIXamlLanguageServer',
+        'LanguageServices\UnoXamlLanguageServer',
+        'LanguageServices\ProGpuWinUIXamlLanguageServer',
+        'LanguageServices\LibreWpfXamlLanguageServer'
     )
 
     # Index source files once. The old filter issued one Test-Path for every XML document and a

@@ -357,30 +357,19 @@ NuGet global-cache packages that could not be re-downloaded** (WinUI-Gallery's `
 reopened. Never run a destructive cache/cleanup step off a diagnosis whose evidence is a status
 string you have not re-derived after a *verified* state change.
 
-#### `od.winui-designer.view "zoom panX panY"` is NOT a literal zoom percentage
+#### `od.winui-designer.view "zoom panX panY"`: zoom is absolute (1 = 100%)
 
-This was the actual trap: `od.winui-designer.view "1 0 0"` looks like "100%, no pan" but is
-**not** — it sets `zoomFactor = 1.0`, which is also what `"fit"` sets internally
-(`UnoDesignSurfaceControl.FitView()`, `zoomFactor = 1.0`). `zoomFactor` is a multiplier on top of
-a separately-computed fit-to-pane baseline scale (`DesignViewport.Fit(...)`), so `zoomFactor=1.0`
-just reproduces "Fit", not "100%" — the same trap the actual ZoomCombo UI resolves by looking up
-`zoomFactor = 1.0 / fitScale` for its "100%" entry (`UnoDesignSurfaceControl.cs`,
-`UpdateZoomCombo`/`OnZoomSelectionChanged`, `ZoomPresets`). To get **true 1:1** (1 render pixel =
-1 screen pixel) so a visual offset is actually visible/measurable:
+Since 2026-09-28 the WinUI/Uno canvas follows the shared canvas contract (WPF, Forms, MAUI):
+**Fit is its own mode and every other zoom is absolute**. `od.winui-designer.view "1 0 0"` is a
+true 100% (1 render pixel per DIP per unit of scale), `"fit"` enters Fit mode, and `"query"`
+reports the effective zoom in either mode. There is no longer any `1 / fitScale` arithmetic to do.
 
-1. Query geometry once at `zoomFactor=1.0` (`"1 0 0"`) — note `frame.width` from
-   `od.winui-designer.surface-geometry`. This is `designWidth * fitScale`.
-2. Compute `fitScale = frame.width / <rendered design width, from od.winui-designer.status's
-   "Rendered by ... (WxH)" message>`.
-3. Set `zoomFactor = 1 / fitScale` via `od.winui-designer.view "<that number> 0 0"`. Re-check
-   `surface-geometry` — `frame.width` should now equal the raw rendered design width exactly
-   (scale = 1.0 confirmed).
-
-Driving the real `ZoomCombo` WPF control through generic `/api/v1/ui/tap` (open dropdown, tap the
-"100%" `ComboBoxItem`) was tried first and did **not** reliably reproduce the SelectionChanged
-commit within a scripted curl sequence — prefer the `od.winui-designer.view` computation above for
-scripted repro; only fall back to `ui/tap` on the combo if a test needs to exercise the actual UI
-control.
+It used to be a factor on top of the fit scale ("100%" = `1/fitScale`, captured once at the first
+layout), computed against the ScrollViewer's viewport. That tied every zoom level to the window
+size, and made a tall design oscillate: a vertical scrollbar narrowed the viewport, which added a
+horizontal one, which shrank the fit and so the scale, which removed it again (measured with a
+400x700 MAUI page: viewport height 187/170, scale 1.0/0.909, with nobody touching anything). The
+viewport is now computed against the scroller's own size, as the WPF canvas does with its host.
 
 #### Numeric geometry vs. actual pixels can disagree — always screenshot to confirm
 

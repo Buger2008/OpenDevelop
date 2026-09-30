@@ -94,6 +94,10 @@ populate_repo_payload() {
     "DisplayBindings/WorkflowDesigner/Host"
     "Debugger"
     "LanguageServices/XamlLanguageServer.Wpf"
+    "LanguageServices/WinUIXamlLanguageServer"
+    "LanguageServices/UnoXamlLanguageServer"
+    "LanguageServices/ProGpuWinUIXamlLanguageServer"
+    "LanguageServices/LibreWpfXamlLanguageServer"
   )
   local keep_args=()
   for folder in "${keep_addin_folders[@]}"; do
