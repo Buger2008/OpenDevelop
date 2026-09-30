@@ -181,6 +181,47 @@ deployment copy explicitly excludes them. The default distribution setting is `-
 `-AddInMaxCpuCount <n>` only for separately validated concurrency experiments, and
 `-UseAddInStaging:$false` only as a diagnostic escape hatch.
 
+### Startup hooks: three constraints, each of which aborts startup
+
+An addin that must run code at startup (e.g. registering a XAML dialect) declares a `Class` codon.
+Violating any one of these kills the app before a window appears:
+
+1. **Instantiable.** `AddIn.CreateObject` needs a public parameterless constructor on a
+   non-abstract type; a `static class` is abstract → `MissingMethodException`.
+2. **An `ICommand`.** `/SharpDevelop/Workbench/AutostartAfterWorkbenchInitialized` casts every item to
+   `System.Windows.Input.ICommand` → derive from `AbstractCommand`, or get `InvalidCastException`.
+   Note the `Workbench/` segment (`CallHelper.cs`): a mistyped path such as
+   `/SharpDevelop/AutostartAfterWorkbenchInitialized` is never built and fails **silently** - the
+   codon simply never runs. The MAUI addin shipped that way, so its dialect was never registered
+   and the WPF designer attached to MAUI pages as well.
+3. **Late enough.** Addins reference host assemblies with `Private="false"`, so
+   `ICSharpCode.SharpDevelop` only resolves once the workbench is up. Using the earlier
+   `/SharpDevelop/Autostart` path JITs the call during `CoreStartup.RunInitialization` →
+   `FileNotFoundException: ICSharpCode.SharpDevelop`.
+
+```csharp
+public sealed class RegisterMyDialect : AbstractCommand
+{
+    // CallHelper.RunWorkbenchInitializedCommands builds each codon and calls Execute -> Run().
+    public override void Run() { MyDialect.Register(); }
+}
+```
+
+### Building an out-of-tree addin against this tree
+
+- Pin `LibreWPF.Sdk` in the addin repo's **own** `global.json` (no `"sdk"` section): MSBuild reads
+  `global.json` only from the build's entry point, so this repo's is never consulted (MSB4236).
+- Add a `NuGet.config` with the local `LibreWPF.*` feed and `packageSourceMapping` (nuget.org
+  listed too); this repo's relative feed path does not apply from elsewhere.
+- `pwsh` must be on `PATH`: `src/Directory.Build.targets` runs
+  `build/patch-librewinforms-deps.ps1` post-build (MSB3073 otherwise).
+- Pass `-p:OpenDevelopRoot=…/` explicitly, normalise it with `EnsureTrailingSlash`, and use forward
+  slashes inside `Exists()` - MSBuild normalises separators in `ProjectReference` but not there, so a
+  backslash fails silently on macOS/Linux (surfacing as MSB9008).
+- Pin `StreamJsonRpc` to `Directory.Packages.props`' version so `[JsonRpcMethod]` type identity matches.
+- A spawned child host is its own application: keep `Designer.Remote`/`Designer.Server` at
+  `Private=true` there, unlike the in-process addin.
+
 ### Architecture: addins are AnyCPU, and the SDK enforces it
 
 OpenDevelop ships one payload that must run in whichever architecture the user's `dotnet` host

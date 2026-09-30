@@ -677,8 +677,8 @@ have changed.
   `Name`/`Parent`/`Properties`) maps onto `DesignerElementNode` (Id/Name/Type/bounds/Path/
   Children) the same way WinUI's tree already does — this shape was designed WinUI/WPF-shared
   from the start. The child mints a stable per-generation `Id` for each `DesignItem` (it has none
-  today); bounds come from `View`/layout the same way `UnoDesignSurfaceControl.GetBoundsInRoot`
-  computes them for WinUI.
+  today); bounds come from `View`/layout the same way the WinUI host computes them (then in
+  `UnoDesignSurfaceControl.GetBoundsInRoot`; that control is now the shared `DesignSurface`).
 - **Save/flush.** `DesignContext.Save(XmlWriter writer)` (via `DesignSurface.SaveDesigner`) always
   serializes the whole document from the root — this already matches `FlushAsync` →
   `DesignerEditSet.Files` (full-text file snapshots), exactly like WinForms/WinUI. No streaming
@@ -1337,6 +1337,13 @@ pointer/frame traffic is not JSON/base64 data-plane traffic.
 - Does the change rely on perfect ALC unload instead of a process restart boundary?
 
 ### Phase 2 cutover begun: `WpfSurfaceDesignerControl` (2026-08-17)
+
+> **Superseded (2026-09-30).** `WpfSurfaceDesignerControl` no longer derives from `DesignerCanvas`
+> and no longer draws its own selection or viewport: it derives from the shared `DesignSurface` in
+> the `ICSharpCode.DesignerCanvas` addin, like every other designer, and supplies only the frame,
+> the tree and the hit test. Drag, resize, marquee, multi-select, zoom and gridlines all come from
+> that canvas. The history below describes the control as it was first built. See
+> [designer-canvas-addin.md](designer-canvas-addin.md).
 
 The actual cutover of `WpfViewContent.cs` from the in-process `DesignSurface` to the DDP child
 has started, in the same spirit as `RemoteFormsDesignerControl`/`UnoDesignSurfaceControl`: a new

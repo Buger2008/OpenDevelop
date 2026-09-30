@@ -1520,6 +1520,11 @@ The common cause was not carelessness but the feedback loop: this logic lived in
 build → deploy three layers → launch → click a specific pixel by hand. Nothing about it was
 reachable from a test.
 
+> **Removed (2026-09-30).** The WinForms designer moved to the shared canvas, whose backend hit
+> test picks the innermost element directly, and `DesignSurfaceClickArbiter` with its tests was
+> deleted. See [designer-canvas-addin.md](designer-canvas-addin.md). The record below is kept for
+> the three regressions it describes.
+
 Extracted to `Designer.Presentation/DesignSurfaceClickArbiter.cs` as a pure function over a
 `DesignSurfaceClickCandidate` list (name, parent, bounds, visibility - projected from whatever
 component model the calling designer has, so WinUI/WPF surfaces can adopt it) returning

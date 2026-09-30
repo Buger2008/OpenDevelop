@@ -131,6 +131,13 @@ scale. Cache hits still carry the requesting version/revision and obey the stale
 | toolbar capability negotiation | runtime-specific capabilities |
 | lifecycle DevFlow fields and contract tests | backend-specific fidelity tests |
 
+**Canvas (2026-09-30).** "canvas, frame presenter, selection overlay" is one addin,
+`ICSharpCode.DesignerCanvas` (`DesignSurface` + `DesignSurfaceController`, keyed by element Name or
+Id), used by every framework: WinUI, Uno, ProGPU, MAUI, WPF, WinForms, GTK 4 and MewUI. A backend
+supplies a frame, a node tree with bounds, and `IDesignCanvasBackend.HitTest`; it no longer owns a
+canvas control. Consumers import it with `$ICSharpCode.DesignerCanvas/...` and never carry a private
+copy of it or of `Designer.Presentation`. See [designer-canvas-addin.md](designer-canvas-addin.md).
+
 The common layer cannot assume XAML, C#, GtkBuilder XML, HWNDs or a property system. A backend
 cannot reimplement process leasing, idle shutdown, crash fan-out or stale-frame acceptance.
 
@@ -473,6 +480,69 @@ Rules:
 - Version increments happen on the host whenever it accepts new source (host edit, accepted
   child edit, external change). Version is a `long`, monotonically increasing per document.
 
+## Document ownership modes
+
+Two things are easy to conflate: who owns the **file** and who owns the **editing model** (the
+thing that turns "move this button up" or "set this property" into new source).
+
+**The file is always the host's.** Saving is always `flush → apply → normal save` (below); dirty
+state and the save belong to the IDE in every backend. Visual Studio does the same in both of its
+out-of-process designers.
+
+**The editing model is chosen per backend**, by the form of the document - not by the UI framework
+as such - and by hard constraints:
+
+1. *Is the document declarative text the IDE can edit correctly without the runtime?* (XAML,
+   GtkBuilder `.ui`: yes. WinForms `InitializeComponent`, MewUI's C#: no - they are code only the
+   target runtime's serializer produces.)
+   - Yes → prefer the **host model**: the IDE edits the text; the child renders and reports the
+     element tree, layout and property metadata. This is Visual Studio's XAML *surface
+     isolation*: the designer and its `ModelItem` tree run in devenv, "only user code and control
+     libraries are loaded in a separate process", and live values reach the IDE as serialized
+     proxies. Formatting is preserved exactly, a child crash loses nothing, and there is one undo
+     history with the text editor.
+   - No → the **child model**: the IDE sends `design/*` mutations, the child applies them to the
+     runtime model and `session/flush` returns the source. This is Visual Studio's WinForms
+     out-of-process designer: real controls and the (Roslyn-based) serializer live in
+     DesignToolsServer, which runs on the project's target runtime; devenv holds proxies.
+2. *Does a hard constraint override (1)?* Licensing, or a runtime the IDE cannot reach. Then the
+   child model is used even for text, and its obligations below must be met explicitly.
+
+| Backend | Document | Model | Why |
+|---|---|---|---|
+| WinUI/Uno | XAML | host | (1) - Visual Studio's XAML split |
+| WPF | XAML | child | historical; (1) would allow host |
+| MAUI (out-of-tree) | XAML | child | (2): its editing model is GPL, the addin is MIT |
+| WinForms | generated code | child | (1) - Visual Studio's WinForms split |
+| MewUI | C# | child | (1) |
+| GTK 4 | `.ui` XML | child | historical; (1) would allow host |
+
+**Obligations of a child-model backend** (each needs a test, because each is where it loses to the
+host model):
+
+- *Formatting preservation*: an edit changes only what it edits - every other byte of the file
+  (attribute order, whitespace, comments, unrelated elements) survives `session/flush`.
+- *Crash safety*: an accepted edit survives a child crash - the host must be able to recover the
+  document as of the last accepted edit, not the last save.
+- *Version discipline*: a mutation against a stale `BaseVersion` is rejected, never merged.
+
+**Measured (2026-09-28)** - one Properties-pad edit (`Content`/`Text` of one button), then save,
+`diff` against the original file:
+
+| Backend | Mode | Lines changed | Notes |
+|---|---|---|---|
+| WinUI/Uno | host | 1 (the edited value) | exact |
+| MAUI | child | 1 (the edited value) | after `MinimalXamlWriter` (patches the original text); before, every save regenerated the file |
+| WPF | child | **35** | every multi-line start tag collapsed onto one line, the edited attribute moved last, the trailing newline dropped, and an **empty `<Window.Resources>` / `MergedDictionaries` block inserted** that the page never had - fails the formatting obligation and writes content the user did not author. The injected block (and rewritten `pack://application:,,,/` URIs) came from the child splicing App.xaml resources into the page text before parsing; fixed 2026-09-29 by parsing the text untouched and relying on the parser's `Application.Current` fallback plus `SurfaceTypeFinder.ConvertUriToLocalUri`. The whole-document reformat was fixed the same day: `session/flush` now patches the parsed text (`MinimalXamlTextPatcher`, matching model elements to their source spans through `PositionXmlElement` line info), so a one-attribute edit changes one attribute; a full regenerate is only the fallback for a shape the patcher cannot express. Re-measured on LibreWPF via DevFlow (Properties pad `Content` edit + save of `LibreWpfSample/MainWindow.xaml`): **1** line |
+
+MAUI also meets crash safety: every accepted edit is flushed at once, and a host that dies is
+restarted and reopened on that text (its integration journey kills the host mid-session and
+checks nothing is lost).
+
+**In both modes the child reports property metadata** (kinds, choices, events), because only it
+has the real types - the same reason Visual Studio serializes live values across from the runtime
+process.
+
 ## Document synchronization
 
 The host is authoritative for the designed document and its supporting files (App.xaml,
@@ -696,9 +766,13 @@ In practice both shipped backends use **discrete named RPCs** (`design/rename`,
 `design/command` in the method table reads as "whatever discrete named RPCs a backend needs",
 not a literal generic verb.
 
-- Undo/Redo are child-authoritative during visual editing; the result synchronizes source to
-  the host (dirty state follows an *accepted* document change).
-- A source reload (`session/update`) establishes a designer-history boundary.
+- Undo/Redo live with the host, as whole-document snapshots: before each accepted designer edit
+  the host keeps the document text it replaces (from its own model, or `session/flush` in the
+  child-model mode below), and undo/redo restore a snapshot with `session/update`. This is correct
+  in both ownership modes and keeps one history with the text editor (the WPF, WinUI and MAUI
+  designers all do this). Dirty state follows an *accepted* document change.
+- A source reload (`session/update`) that did not come from undo/redo establishes a
+  designer-history boundary.
 
 ## Failure, restart, and safe mode
 
@@ -800,6 +874,39 @@ Host                              Child
 ```
 
 ---
+
+## Dialect ownership: which designer owns a `.xaml` file
+
+`DisplayBindingService.AttachSubWindows` attaches **every** secondary binding whose `CanAttachTo`
+returns true - no priority, no mutual exclusion. The WPF binding used to claim any `.xaml` it could
+not prove was WinUI/Uno, so an unforeseen dialect (MAUI's `ContentPage`, …) got two Design tabs.
+Ownership is therefore declared at runtime, so an out-of-tree designer needs no edit here:
+
+- `XamlDialectRegistry` (`Base/Project/Src/LanguageServices/Xaml/XamlDialectRegistry.cs`) maps an
+  open **string** dialect key (`XamlDialectKeys.Wpf`/`WinUI`/`Uno`, or an addin's own, e.g.
+  `"Maui"`, `"Workflow"`) to a `Matches(fileName)` predicate and an optional child-host assembly.
+  `XamlFrameworkKind` and its switch sites are untouched; an out-of-tree dialect never joins that enum.
+- A binding opts in by implementing `IXamlDialectDisplayBinding.Dialects`. `AttachSubWindows`
+  skips such a binding when the file resolves to a dialect it does not list. Bindings that do not
+  implement the interface are unaffected.
+- **`ResolveDialect` returning `null` means "unclaimed" and filters nothing** - e.g. a WPF file
+  whose project is not in the open solution must still reach the WPF designer.
+- A throwing third-party matcher degrades to "unclaimed" instead of breaking the built-ins.
+- `XamlDesignerHostSelector` consults the registry first but **keeps** its built-in
+  `XamlRuntimeKind` switch: WPF and WinUI markup are each served by two hosts (LibreWPF vs
+  Microsoft WPF, Uno vs Microsoft WinUI), so a dialect key never overrides the built-in isolation;
+  only an out-of-tree dialect supplies its own host name.
+
+- A registration may also supply `ToolsContent`, the Toolbox pad content for that dialect's files
+  in the XAML **source** editor. `AvalonEditViewContent.ToolsContent` asks
+  `XamlDialectRegistry.GetToolsContent` first and falls back to its built-in WPF/WinUI choice, so a
+  MAUI file's Source tab offers MAUI controls (and a drag onto the markup inserts one) instead of
+  WPF's; a throwing provider degrades to the built-in choice.
+
+An out-of-tree designer registers from its own addin (CoreWF's `WorkflowDesignerDialect`,
+MAUI's `RegisterMauiDialect`); see [addin-sdk.md](addin-sdk.md), "Startup hooks", for the three
+constraints that registration hook must satisfy. Covered by `XamlDialectRegistryTests`
+(`tests/OpenDevelop.Base.Tests`).
 
 # Part II — The implementations
 
@@ -1197,6 +1304,11 @@ Legend: **✓** implemented and exercised · **~** partial (see note) · **✗**
 
 ## Canvas shell & presentation (shared)
 
+**Zoom contract** (every frame-based canvas: WinForms, WPF, WinUI/Uno, MAUI): Fit is its own mode
+(`DesignViewport.Fit`), every other zoom is ABSOLUTE (`DesignViewport.Zoom`, 1.0 = 100%, the
+default), and the viewport is computed from the canvas host's / scroller's own size - never from a
+ScrollViewer's ViewportWidth/Height, which changes with the scrollbars the scale itself causes.
+
 `DesignerCanvasCapabilities` is the single toolbar visibility contract. Controls always retain
 the canonical order `Zoom → Fit → Gridlines → Theme → Show Names → Design Size`; unsupported
 controls are collapsed rather than left visible and inert. Refresh, Restart Host, Source, Delete,
@@ -1206,7 +1318,7 @@ Undo and Redo belong to document lifecycle or the IDE command system, not the ca
 |---|---|---|---|---|---|
 | Shared `DesignerCanvas` shell + toolbar | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Declared visible capabilities | Zoom, Fit | Zoom, Fit, Gridlines, Show Names, optional Theme | All six | Zoom, Fit, Gridlines | Zoom, Fit, Gridlines |
-| Zoom combo (100% default, VS behavior) | ✓ (**fixed 2026-08-18**: viewport and hit-test scaling) | ✓ (Stretch.Fill fix landed) | ✓ | ✓ (safe projection) | ✓ (safe projection) |
+| Zoom combo (100% default, VS behavior) | ✓ (**fixed 2026-08-18**: viewport and hit-test scaling) | ✓ (Stretch.Fill fix landed) | ✓ (**2026-09-28**: absolute zoom + Fit mode, viewport from the scroller's own size — was fit-relative and oscillated on tall designs) | ✓ (safe projection) | ✓ (safe projection) |
 | Fit | ✓ | ✓ | ✓ | ✓ (measured safe projection) | ✓ (measured native frame) |
 | Gridlines toggle | ✗ (hidden) | ✓ (shared `GridlineOverlay`) | ✓ (shared `GridlineOverlay`) | ✓ (safe-projection brush) | ✓ (native-frame overlay brush) |
 | Show names on selection (toolbar toggle, default on) | ✗ (hidden) | ✓ | ✓ | ✗ (hidden) | ✗ (hidden) |

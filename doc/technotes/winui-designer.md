@@ -332,6 +332,13 @@ any profile.
 
 ### ProGPU WinUI Host
 
+> **Since 2026-09-29** the ProGPU host no longer presents into its own WPF control:
+> `ProGpuWinUIHostControl` is deleted. `ProGpuRuntimeHost` renders the page offscreen
+> (`ProGpuOffscreenRenderer`, WebGPU texture to BGRA), builds its element tree (`ProGpuDesignTree`)
+> and shows both on the shared design canvas (`doc/technotes/designer-canvas-addin.md`), like every
+> other backend. Notes below that name `ProGpuWinUIHostControl` describe the earlier in-window
+> host; the `WgpuContext.Current` save/restore now lives in `ProGpuOffscreenRenderer.EnsureContext`.
+
 > **Updated 2026-08-15:** the in-process ProGPU path is supported for projects targeting
 > `ProGPU.WinUI`. It remains retired as a renderer or fallback for projects targeting Uno.WinUI
 > or the Windows App SDK because those assemblies have incompatible type identities.
