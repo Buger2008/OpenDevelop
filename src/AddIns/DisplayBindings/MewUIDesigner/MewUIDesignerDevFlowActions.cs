@@ -28,7 +28,7 @@ public static class MewUIDesignerDevFlowActions
 			selectedName = view.SelectedName, selectedIds = view.SelectedIds, hostProcessId = view.HostProcessId, hostPoolKey = view.HostPoolKey, hostSessionId = view.HostSessionId, hostDocumentId = view.HostDocumentId, activeHostLeases = view.ActiveHostLeases, hostRecoveryCount = view.HostRecoveryCount, canUndo = view.EnableUndo, canRedo = view.EnableRedo,
 			toolboxItemCount = view.ToolboxItemCount, toolboxFilterText = view.ToolboxFilterText, toolboxSelectedItem = view.SelectedToolboxType, toolboxHosted = view.IsToolboxHosted, toolboxSearchHosted = (SD.Services.GetService(typeof(IToolsPadHost)) as IToolsPadHost)?.HasToolboxSearch == true, zoomComboSelectedIndex = view.ZoomComboSelectedIndex, outlineHosted = view.IsOutlineHosted, outlineItemCount = view.OutlineItemCount,
 			propertyPadSelectedType = grid?.SelectedObject?.GetType().FullName, propertyPadPropertyCount = grid?.Properties?.Count ?? 0,
-			toolbarItemCount = view.ToolbarItemCount, toolbarItems = view.ToolbarItems, toolbarCapabilities = view.ToolbarCapabilities, zoom = view.Zoom, fitMeasured = view.FitMeasured, gridlines = view.Gridlines,
+			hasNativeFrame = view.HasNativeFrame, nativeFrameWidth = view.NativeFrameWidth, nativeFrameHeight = view.NativeFrameHeight, nativeBoundsCount = view.NativeBoundsCount, diagnostics = view.Diagnostics, toolbarItemCount = view.ToolbarItemCount, toolbarItems = view.ToolbarItems, toolbarCapabilities = view.ToolbarCapabilities, zoom = view.Zoom, fitMeasured = view.FitMeasured, gridlines = view.Gridlines,
 			isDirty = view.IsDesignerDirty, hostLogTail = view.HostLogTail
 		});
 	}
@@ -152,9 +152,8 @@ public static class MewUIDesignerDevFlowActions
 	{
 		var v = Activate();
 		if (v == null) return JsonSerializer.Serialize(new { success = false, error = "MewUI designer is not loaded" });
-		var target = v.FindPreviewTarget(id);
-		if (target == null) return JsonSerializer.Serialize(new { success = false, error = "No rendered preview target for: " + id });
-		return JsonSerializer.Serialize(GetScreenBounds(target));
+		if (v.ScreenBoundsOf(id) is not { } bounds) return JsonSerializer.Serialize(new { success = false, error = "No rendered MewUI target for: " + id });
+		return JsonSerializer.Serialize(new { success = true, x = bounds.X, y = bounds.Y, width = bounds.Width, height = bounds.Height, centerX = bounds.X + bounds.Width / 2, centerY = bounds.Y + bounds.Height / 2 });
 	}
 
 	static ListBoxItem? FindRealizedContainer(ItemsControl itemsControl, object item)

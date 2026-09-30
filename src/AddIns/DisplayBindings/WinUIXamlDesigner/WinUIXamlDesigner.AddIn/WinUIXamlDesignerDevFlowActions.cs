@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
@@ -399,7 +399,7 @@ public static class WinUIXamlDesignerDevFlowActions
 		return JsonSerializer.Serialize(new { success = true, profile = view.FrameProfile() });
 	}
 
-	[DevFlowAction("od.winui-designer.view", Description = "Get or set the design-surface viewport. 'query' returns zoom/pan/scale; 'fit' resets to the fitted centered view; 'WxH' sets the design canvas size; 'zoom panX panY' sets the viewport directly")]
+	[DevFlowAction("od.winui-designer.view", Description = "Get or set the design-surface viewport. 'query' returns the effective zoom (1.0 = 100%)/pan; 'fit' enters Fit mode; 'zoom panX panY' sets an ABSOLUTE zoom (1 = 100%) and pan")]
 	public static string View(string command = "query")
 	{
 		var view = ActivateDesigner();

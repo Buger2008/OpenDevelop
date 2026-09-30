@@ -67,6 +67,11 @@ namespace ICSharpCode.WpfDesign.SurfaceHost
 		{
 			if (string.IsNullOrEmpty(name))
 				return projectAssembly;
+			// The project's own output is loaded from bytes (LoadWithoutLocking), which the runtime
+			// cannot find again by name, so an explicit "clr-namespace:X;assembly=<project>" has to
+			// be answered here or it falls through to Assembly.Load and fails.
+			if (projectAssembly != null && string.Equals(projectAssembly.GetName().Name, name, StringComparison.OrdinalIgnoreCase))
+				return projectAssembly;
 
 			var path = referencedAssemblyPaths.FirstOrDefault(candidate =>
 				!string.IsNullOrEmpty(candidate) &&
@@ -84,6 +89,22 @@ namespace ICSharpCode.WpfDesign.SurfaceHost
 			}
 
 			return base.LoadAssembly(name);
+		}
+
+		/// <summary>An application-relative pack URI that names no assembly
+		/// (<c>pack://application:,,,/Assets/x.png</c>) resolves against
+		/// Application.ResourceAssembly - this child host, not the designed project - so name the
+		/// project assembly explicitly. Done here, on the converted value, rather than by rewriting
+		/// the page text: the text is the document model and is saved back to the user's file.</summary>
+		public override Uri ConvertUriToLocalUri(Uri uri)
+		{
+			const string prefix = "pack://application:,,,/";
+			var text = uri.OriginalString;
+			if (projectAssembly == null
+				|| !text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+				|| text.IndexOf(";component/", StringComparison.OrdinalIgnoreCase) >= 0)
+				return uri;
+			return new Uri(prefix + projectAssembly.GetName().Name + ";component/" + text.Substring(prefix.Length), UriKind.Absolute);
 		}
 
 		public override XamlTypeFinder Clone()

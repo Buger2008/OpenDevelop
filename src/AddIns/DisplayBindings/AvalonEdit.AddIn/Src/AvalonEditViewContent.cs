@@ -388,11 +388,12 @@ namespace ICSharpCode.AvalonEdit.AddIn
 				// onto a Uno document's markup would silently produce something the Uno compiler
 				// can't resolve. Same detector the Design-tab secondary view binding itself uses
 				// (WinUIXamlDesignerDisplayBinding.CanAttachTo) to decide WinUI/Uno vs WPF.
-				var kind = ICSharpCode.SharpDevelop.LanguageServices.Xaml.XamlFrameworkDetector.Detect(fileName.ToString()).Kind;
-				if (kind is ICSharpCode.SharpDevelop.LanguageServices.Xaml.XamlFrameworkKind.WinUI
-					or ICSharpCode.SharpDevelop.LanguageServices.Xaml.XamlFrameworkKind.Uno)
-					return ICSharpCode.WinUIXamlDesigner.WinUIXamlToolbox.Instance.ToolboxControl;
-				return ICSharpCode.WpfDesign.AddIn.WpfToolbox.Instance.ToolboxControl;
+				// An out-of-tree dialect (MAUI, ...) that registered its own toolbox gets it here;
+				// the built-in WPF/WinUI choice below is unchanged for everything else.
+				// The WPF and WinUI designer addins register their toolboxes at autostart, so this
+				// editor holds no compile-time reference to either.
+				return ICSharpCode.SharpDevelop.LanguageServices.Xaml.XamlDialectRegistry.GetToolsContent(fileName.ToString())
+					?? ICSharpCode.SharpDevelop.LanguageServices.Xaml.XamlDialectRegistry.GetBuiltInToolsContent(fileName.ToString());
 			}
 		}
 	}

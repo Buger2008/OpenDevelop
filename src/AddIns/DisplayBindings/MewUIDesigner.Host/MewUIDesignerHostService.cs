@@ -24,14 +24,37 @@ sealed class MewUIDesignerHostService : IDesignerChildService
 	[JsonRpcMethod("design/redo")] public DesignerSessionState Redo(string sessionId, string documentId, long baseVersion) { EnsureSession(sessionId); var session = Get(documentId); EnsureVersion(session, baseVersion); if (!session.Document.Redo()) throw new InvalidOperationException("Nothing to undo."); session.RedoDepth--; session.UndoDepth++; session.Version++; return State(session); }
 	[JsonRpcMethod("session/flush")] public DesignerEditSet Flush(string sessionId, string documentId, long baseVersion) { EnsureSession(sessionId); var session = Get(documentId); EnsureVersion(session, baseVersion); return new DesignerEditSet { SessionId = this.sessionId, DocumentId = documentId, BaseVersion = session.Version, Files = { new DesignerSourceFileSnapshot { FileName = session.FileName, Kind = "Designer", Text = session.Document.ToXaml() } } }; }
 	[JsonRpcMethod("session/close")] public object Close(string sessionId, string documentId) { EnsureSession(sessionId); documents.Remove(sessionId, documentId, _ => { }); return new(); }
-	DesignerSessionState State(DocumentSession session) { var root = session.Document.Root; return new DesignerSessionState { SessionId = sessionId, DocumentId = session.DocumentId, Version = session.Version, Accepted = !session.Document.HasErrors && session.Document.LastParseSucceeded, Error = session.Document.Error, RootType = root?.Type ?? "", ComponentCount = root == null ? 0 : Count(root), Tree = root == null ? null : Node(root), CanUndo = session.UndoDepth > 0, CanRedo = session.RedoDepth > 0 }; }
+	DesignerSessionState State(DocumentSession session) { var root = session.Document.Root; var state = new DesignerSessionState { SessionId = sessionId, DocumentId = session.DocumentId, Version = session.Version, Accepted = !session.Document.HasErrors && session.Document.LastParseSucceeded, Error = session.Document.Error, RootType = root?.Type ?? "", ComponentCount = root == null ? 0 : Count(root), Tree = root == null ? null : Node(root, "0"), CanUndo = session.UndoDepth > 0, CanRedo = session.RedoDepth > 0 }; Render(session, root, state); return state; }
+	static void Render(DocumentSession session, MxamlObject? root, DesignerSessionState state)
+	{
+		session.Bounds.Clear();
+		if (root == null || state.Tree == null) return;
+#if MEWUI_RENDER
+		var result = MewUIRenderer.TryRender(root, session.Document.ToXaml(), session.Version);
+		state.Diagnostics.AddRange(result.Diagnostics.Select(m => new DesignerDiagnostic { Severity = "Warning", Message = m }));
+		if (result.Frame.Width <= 0) return;
+		state.Render = result.Frame;
+		Place(state.Tree, "0", result.Bounds, session.Bounds);
+#else
+		state.Diagnostics.Add(new DesignerDiagnostic { Severity = "Info", Message = "MewUI preview rendering is only wired up for the macOS backend; this host shows the element tree without a frame." });
+#endif
+	}
+	static void Place(DesignerElementNode node, string path, Dictionary<string, (double X, double Y, double Width, double Height)> rendered, Dictionary<string, (double X, double Y, double Width, double Height)> byId)
+	{
+		if (rendered.TryGetValue(path, out var b)) { node.X = b.X; node.Y = b.Y; node.Width = b.Width; node.Height = b.Height; byId[node.Id] = b; }
+		for (var i = 0; i < node.Children.Count; i++) Place(node.Children[i], path + "," + i, rendered, byId);
+	}
+	[JsonRpcMethod("design/hit-test")]
+	public DesignerHitTestResult HitTest(string sessionId, string documentId, long baseVersion, double x, double y) { EnsureSession(sessionId); var session = Get(documentId); EnsureVersion(session, baseVersion); var hit = session.Bounds.Where(p => x >= p.Value.X && y >= p.Value.Y && x <= p.Value.X + p.Value.Width && y <= p.Value.Y + p.Value.Height).OrderBy(p => p.Value.Width * p.Value.Height).FirstOrDefault(); return string.IsNullOrEmpty(hit.Key) ? new DesignerHitTestResult() : new DesignerHitTestResult { Hit = true, ComponentName = hit.Key, Chain = { hit.Key } }; }
 	static void Mutated(DocumentSession session) { session.UndoDepth++; session.RedoDepth = 0; session.Version++; }
-	static DesignerElementNode Node(MxamlObject n) => new() { Id = n.Name, Name = n.Name, Type = n.Type, Properties = n.Attributes.Where(a => !a.IsEvent).Select(a => new DesignerPropertyInfo { Name = a.Name, DisplayName = a.Name, Value = a.Value, Category = "MewUI" }).Prepend(new DesignerPropertyInfo { Name = "$name", DisplayName = "Name", Value = n.Name, Category = "Identity" }).ToList(), Events = MewUIControlCatalog.Events.Select(name => new DesignerEventInfo { Name = name, Category = "MewUI Events", Handler = n.Attributes.FirstOrDefault(a => a.IsEvent && string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase))?.Value ?? "" }).ToList(), Children = n.Children.Select(Node).ToList() };
+	// An unnamed element gets a synthetic, path-based id ("#0,2,1") so siblings stay distinct on the
+	// canvas; Name stays empty, and mutations addressed to such an id are rejected by the document.
+	static DesignerElementNode Node(MxamlObject n, string path) => new() { Id = string.IsNullOrEmpty(n.Name) ? "#" + path : n.Name, Name = n.Name, Type = n.Type, Properties = n.Attributes.Where(a => !a.IsEvent).Select(a => new DesignerPropertyInfo { Name = a.Name, DisplayName = a.Name, Value = a.Value, Category = "MewUI" }).Prepend(new DesignerPropertyInfo { Name = "$name", DisplayName = "Name", Value = n.Name, Category = "Identity" }).ToList(), Events = MewUIControlCatalog.Events.Select(name => new DesignerEventInfo { Name = name, Category = "MewUI Events", Handler = n.Attributes.FirstOrDefault(a => a.IsEvent && string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase))?.Value ?? "" }).ToList(), Children = n.Children.Select((c, i) => Node(c, path + "," + i)).ToList() };
 	static int Count(MxamlObject n) => 1 + n.Children.Sum(Count);
 	void EnsureSession(string candidate) => documents.ValidateSession(candidate);
 	DocumentSession GetOrCreate(string documentId) => documents.GetOrAdd(sessionId, documentId, () => new DocumentSession(documentId));
 	DocumentSession Get(string documentId) => documents.Get(sessionId, documentId);
 	static void EnsureVersion(DocumentSession session, long candidate) { if (candidate != session.Version) throw new InvalidOperationException($"Stale version {candidate}; current is {session.Version}."); }
 	[JsonRpcMethod("ping")] public object Ping() => new(); [JsonRpcMethod("shutdown")] public object Shutdown() { documents.CloseAll(_ => { }); shutdown.Set(); return new(); } public void WaitForShutdown() => shutdown.Wait(); public void OnParentDisconnected() => shutdown.Set();
-	sealed class DocumentSession { public DocumentSession(string documentId) => DocumentId = documentId; public string DocumentId { get; } public MxamlDocument Document { get; } = new(); public string FileName = ""; public long Version; public int UndoDepth; public int RedoDepth; }
+	sealed class DocumentSession { public DocumentSession(string documentId) => DocumentId = documentId; public string DocumentId { get; } public MxamlDocument Document { get; } = new(); public string FileName = ""; public long Version; public int UndoDepth; public int RedoDepth; public readonly Dictionary<string, (double X, double Y, double Width, double Height)> Bounds = new(); }
 }

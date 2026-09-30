@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
+using ICSharpCode.SharpDevelop.Designer.Surface;
 using ICSharpCode.SharpDevelop.Designer.Presentation;
 using ICSharpCode.SharpDevelop.Designer.Remote;
 using ICSharpCode.SharpDevelop.LanguageServices.Xaml;
@@ -34,7 +35,11 @@ public sealed class WinUIXamlHost : ContentControl, IDisposable
 		// Uno, and off Windows (where Microsoft WinUI cannot run) no host is started for it at all.
 		if (!XamlFrameworkDetector.IsRuntimeSupportedOnThisOS(framework.Runtime)) {
 			var unavailable = new ICSharpCode.SharpDevelop.Widgets.DesignerCanvas();
-			unavailable.BackendName = framework.Runtime == XamlRuntimeKind.Uno ? "Uno" : "WinUI";
+			unavailable.BackendName = framework.Runtime switch {
+				XamlRuntimeKind.Uno => "Uno",
+				XamlRuntimeKind.ProGpuWinUI => "ProGPU WinUI",
+				_ => "WinUI"
+			};
 			unavailable.ShowUnavailable(UnsupportedOnThisOSText);
 			Content = unavailable;
 			return;
@@ -417,9 +422,9 @@ public sealed class WinUIXamlHost : ContentControl, IDisposable
 
 	public XamlFrameworkContext Framework { get; }
 	public bool HasRenderedPreview => runtime?.HasRenderedPreview == true;
-	// ProGPU (the WPF XamlReader-compatible fallback) only accepts XamlRuntimeKind.Uno, so a null
-	// runtime here is only ever reachable for a MicrosoftWinUI document whose out-of-process child
-	// host isn't deployed - never for Uno, which always has ProGPU as a safety net. Name the
+	// ProGPU accepts XamlRuntimeKind.ProGpuWinUI and (as a fallback) Uno, so a null runtime here is
+	// only ever reachable for a MicrosoftWinUI document whose out-of-process child host isn't
+	// deployed - never for Uno, which always has ProGPU as a safety net. Name the
 	// specific missing runtime instead of "WinUI/Uno", which wrongly implies either could be at
 	// fault.
 	static string UnsupportedOnThisOSText
@@ -428,6 +433,7 @@ public sealed class WinUIXamlHost : ContentControl, IDisposable
 	public string StatusText => runtime?.StatusText ?? (!XamlFrameworkDetector.IsRuntimeSupportedOnThisOS(Framework.Runtime) ? UnsupportedOnThisOSText : null) ?? Framework.Runtime switch {
 		XamlRuntimeKind.MicrosoftWinUI => "WinUI 3 runtime host is not installed.",
 		XamlRuntimeKind.Uno => "Uno runtime host is not installed. The WPF XamlReader compatibility renderer is disabled.",
+		XamlRuntimeKind.ProGpuWinUI => "ProGPU WinUI runtime host is not installed.",
 		_ => "No WinUI/Uno runtime host is available for this document."
 	};
 	public void LoadXaml(string text) => runtime?.LoadXaml(text ?? string.Empty);
@@ -737,9 +743,12 @@ public interface IWinUIXamlToolboxCatalog
 /// </summary>
 public interface IWinUIXamlDesignView
 {
+	/// <summary>The effective zoom (1.0 = 100%, in either mode) and the pan in surface DIPs.</summary>
 	(double Zoom, double PanX, double PanY) GetViewport();
 	double GetViewportScale();
+	/// <summary>An ABSOLUTE zoom (1.0 = 100%, the shared canvas contract) and pan; leaves Fit mode.</summary>
 	void SetViewport(double zoom, double panX, double panY);
+	/// <summary>Enters Fit mode: the design follows the pane size.</summary>
 	void FitView();
 	/// <summary>Design-space point to surface-local DIPs, honoring the viewport.</summary>
 	(double X, double Y) DesignToSurfacePoint(double x, double y);
@@ -752,23 +761,6 @@ public interface IWinUIXamlDesignView
 	(double Width, double Height)? GetDesignSize();
 	void SetDesignSize(double width, double height);
 	void ResetDesignSize();
-}
-
-/// <summary>
-/// A committed design-surface drag: the named element and its start/end rects in design
-/// coordinates. The shell turns the rects into source edits (Margin/Width/Height).
-/// </summary>
-public sealed class ElementDragInfo
-{
-	public string Name { get; set; }
-	public double StartX { get; set; }
-	public double StartY { get; set; }
-	public double StartWidth { get; set; }
-	public double StartHeight { get; set; }
-	public double EndX { get; set; }
-	public double EndY { get; set; }
-	public double EndWidth { get; set; }
-	public double EndHeight { get; set; }
 }
 
 /// <summary>
@@ -813,19 +805,6 @@ public interface IWinUIXamlIncrementalRender
 	/// <summary>DDP design/rename: renames the live element. Landed as an unused capability - no
 	/// call site in this shell renames an already-named element today.</summary>
 	void TryRename(string elementName, string newName, string fallbackXaml);
-}
-
-/// <summary>
-/// A double-click on a design element: its name and design rect. A null value means the
-/// double-click hit empty space.
-/// </summary>
-public sealed class ElementDoubleClickInfo
-{
-	public string Name { get; set; }
-	public double X { get; set; }
-	public double Y { get; set; }
-	public double Width { get; set; }
-	public double Height { get; set; }
 }
 
 /// <summary>

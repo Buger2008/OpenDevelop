@@ -8,6 +8,7 @@ using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Automation.Provider;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Markup;
@@ -19,26 +20,14 @@ using System.Drawing.Design;
 using ICSharpCode.SharpDevelop.Designer.Presentation;
 using ICSharpCode.SharpDevelop.Designer.Remote;
 using ICSharpCode.SharpDevelop.Widgets;
+using ICSharpCode.SharpDevelop.Designer.Surface;
+using System.Threading.Tasks;
 
 namespace ICSharpCode.FormsDesigner.OutOfProcess
 {
-	sealed class RemoteFormsDesignerControl : DesignerCanvas
+	sealed class RemoteFormsDesignerControl : DesignSurface, IDesignCanvasBackend
 	{
 		readonly FormsDesignerHostClient client;
-		readonly Grid designSurface = new Grid();
-		readonly Canvas scrollContent = new Canvas();
-		readonly ScrollViewer scroller = new() {
-			HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-			VerticalScrollBarVisibility = ScrollBarVisibility.Auto
-		};
-		// Stretch.Fill (matching WpfSurfaceDesignerControl/UnoDesignSurfaceControl exactly): the
-		// bitmap must scale to fill framePresenter.Visual's Width/Height, which is all Resize()
-		// actually changes on zoom - Stretch.None would keep showing the bitmap at its native
-		// pixel size regardless of Width/Height, so the selection outline (computed independently
-		// through viewport.Scale) would resize with zoom while the rendered form image itself
-		// visibly stayed at its pre-zoom size.
-		readonly DesignFramePresenter framePresenter = new(Stretch.Fill,
-			horizontalAlignment: HorizontalAlignment.Left, verticalAlignment: VerticalAlignment.Top);
 		readonly Canvas adorners;
 		/// <summary>One live overlay per currently-expanded menu dropdown (see
 		/// DesignerSessionState.Popups), keyed by OwnerElementId. Each is a real WPF Image that is
@@ -56,14 +45,6 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 		/// design/add-toolstrip-item RPC (parentItemId = the popup's own OwnerElementId) rather
 		/// than by forwarding input to the real template node.</summary>
 		readonly Dictionary<string, PopupTypeHereEditor> popupEditors = new(StringComparer.Ordinal);
-		readonly Canvas guides;
-		// Drag-snap alignment guides (see SnapGuideCalculator): a vertical or horizontal line
-		// shown while a component is being dragged near another component's edge/centre,
-		// matching UnoDesignSurfaceControl's own guide overlay/rendering. Kept separate from
-		// `guides` (which UpdateDesignGuides clears wholesale on every viewport/selection
-		// change) so a live drag's guides aren't wiped by an unrelated redraw.
-		readonly Canvas snapGuideOverlay = new Canvas { IsHitTestVisible = false };
-		readonly List<Rectangle> snapGuides = new();
 		// The component tray - the icon+name strip below the design surface that holds every
 		// non-visual component (Timer/ImageList/ToolTip/dialogs) plus the Controls whose designer
 		// is not a ControlDesigner (ContextMenuStrip, PrintPreviewDialog). It is deliberately a
@@ -72,9 +53,20 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 		// ISplitWindowService.AddSplitWindow: the tray keeps its own scrollbar and its own fixed
 		// item size, unaffected by the canvas zoom.
 		readonly Border trayRegion;
-		readonly WrapPanel trayItems = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(4, 3, 4, 3) };
-		/// <summary>The real designer's own default tray height (ComponentTray's _trayHeight).</summary>
-		const double TrayHeight = 80;
+		// A grid of equal cells: ItemWidth/ItemHeight make every entry the same size, and
+		// LayoutTrayCells divides the available width evenly among as many columns as fit.
+		readonly WrapPanel trayItems = new WrapPanel {
+			Orientation = Orientation.Horizontal, Margin = new Thickness(TrayPadding), ItemHeight = TrayCellHeight
+		};
+		readonly ScrollViewer trayScroller = new ScrollViewer {
+			VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+			HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+		};
+		const double TrayCellHeight = 26;
+		const double TrayMinCellWidth = 150;
+		const double TrayPadding = 3;
+		/// <summary>The tray grows with its rows up to this many, then scrolls.</summary>
+		const int TrayMaxVisibleRows = 3;
 		/// <summary>The same selection-blue WinUI's own UnoDesignSurfaceControl uses
 		/// (Color.FromRgb(0x00, 0x78, 0xD4)) - unifies the two designers' selection look, which
 		/// previously differed (this one used the brighter stock <c>Brushes.DodgerBlue</c>).</summary>
@@ -87,17 +79,9 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			return brush;
 		}
 
-		// showLabel stays false: this designer already shows a per-component name label for EVERY
-		// control via UpdateDesignGuides' own "label" TextBlock (not just the selected one), so a
-		// second, selection-only label from this shared layer would be redundant/wrong.
-		readonly SelectionAdornerLayer adornerLayer = new(Array.Empty<string>(), SelectionBrush, showLabel: false);
-		readonly Rectangle marqueeBorder;
-		readonly Thumb moveThumb;
-		readonly Thumb resizeHitTarget;
-		readonly Thumb resizeThumb;
-		/// <summary>Drag-to-reorder for a selected ToolStripItem (never a Control, so moveThumb -
-		/// which drives design/set-bounds - is not applicable): covers the same bounds moveThumb
-		/// would, but only ever accumulates a horizontal offset and, on drop, asks the real
+		/// <summary>Drag-to-reorder for a selected ToolStripItem (never a Control, so the canvas's
+		/// own move - which drives design/set-bounds - is not applicable): covers the item's bounds,
+		/// but only ever accumulates a horizontal offset and, on drop, asks the real
 		/// designer to move the item to a new INDEX among its siblings via
 		/// design/reorder-toolstrip-item, rather than a pixel position.</summary>
 		readonly Thumb reorderThumb;
@@ -106,7 +90,7 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 		/// (a MenuStrip submenu/ContextMenuStrip's own items) rather than laid out on a root
 		/// strip - vertical, matching how a dropdown stacks its items top to bottom (the opposite
 		/// orientation from <see cref="reorderThumb"/>'s root-strip case). Positioned from the
-		/// same dragX/Y/Width/Height rect reorderThumb uses - a popup item's own SurfaceX/Y/Width/
+		/// same rect reorderThumb uses - a popup item's own SurfaceX/Y/Width/
 		/// Height are already reported in the same absolute basis a root item's are (see
 		/// OnPopupReorderDragCompleted's own note), so no separate coordinate source is needed.</summary>
 		readonly Thumb popupReorderThumb;
@@ -123,8 +107,8 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 		readonly TextBlock disconnectedText;
 		// The VS "smart tag" chevron (DesignerActionList popup) and the ToolStrip/StatusStrip/
 		// MenuStrip "insert new item" chevron. Both are plain Borders (not Button - a Button's
-		// default theme chrome is exactly the opaque-rectangle trap moveThumb's own comment
-		// above describes) positioned by PositionAdorners like every other handle in this file.
+		// default theme chrome is exactly the opaque-rectangle trap CreateTransparentThumbTemplate
+		// describes) positioned by PositionAdorners in the canvas's extension layer.
 		readonly Border smartTagChevron;
 		readonly Border toolStripInsertChevron;
 		// The MenuStrip flavour of the same affordance. ToolStripTemplateNode.SetupNewEditNode
@@ -221,61 +205,15 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 		// chain, walking Parent up from the item being edited.
 		internal DesignerSessionState state;
 		long lastFrameSequence;
-		// The design surface is unscaled; the shared canvas shell's zoom toolbar controls the
-		// presentation scale around it via DesignViewport - the same coordinate math
-		// UnoDesignSurfaceControl uses for its zoom/pan, so both backends' conversions share
-		// one type (see DesignViewport's doc comment). Zoom/Fit re-derive the viewport and
-		// re-present without re-decoding the frame.
-		DesignViewport viewport = DesignViewport.Identity(0, 0);
 		DesignerComponentInfo selectedComponent;
-		double dragX;
-		double dragY;
-		double dragStartX;
-		double dragStartY;
-		double dragWidth;
-		double dragHeight;
-		// Kept next to the Forms overlay rather than in Designer.Presentation so the add-in
-		// never requires an ABI change in a host-provided shared presentation assembly.
-		Rect renderedSelection;
-		int selectedLocalX;
-		int selectedLocalY;
-		bool showTabOrder;
-		/// <summary>Whether each component's name is drawn on the selection outline - wired to
-		/// the shared design-canvas toolbar's "Show Names" toggle (DesignerCanvasCapabilities.
-		/// ShowNames/ShowNamesRequested), which this control did not previously enable.</summary>
-		// Off by default, matching DesignerCanvas's own "Show Names" toggle now starting unchecked
-		// (see its own comment) - WinForms keeps this as its own separate field (rather than
-		// SelectionAdornerLayer.ShowNameLabel, which this backend never uses - it passes
-		// showLabel:false when constructing adornerLayer) because it drives the design-guide
-		// label drawn near a component, not a selection-outline label.
-		bool showComponentLabels;
-		bool resizingDrag;
-		bool previewResizeDrag;
-		Point previewDragPoint;
-		bool marqueeSelecting;
-		bool marqueeExtendsSelection;
-		Point marqueeStart;
 		readonly HashSet<string> selectedComponentNames = new HashSet<string>(StringComparer.Ordinal);
 		readonly HashSet<string> lockedComponentNames = new HashSet<string>(StringComparer.Ordinal);
 
-		/// <summary>Empty space kept on every side of the design inside the canvas, so the root
-		/// component's own resize handles are reachable and DesignerCanvas's tiled "EdgePattern"
-		/// background is visible around the form - matches WpfSurfaceDesignerControl's own
-		/// CanvasPadding (the WPF designer already has this; this control did not, which is
-		/// exactly why the WinForms designer's canvas visibly had no border around the form
-		/// while the WPF/WinUI ones did).</summary>
-		const double CanvasMargin = 24;
-
-		static readonly double[] ZoomPresets = { 0.25, 0.5, 0.75, 1.0, 1.5, 2.0 };
-		static readonly string[] ZoomLabels = { "Fit", "25%", "50%", "75%", "100%", "150%", "200%" };
-		// The zoom combo starts at "100%" (VS behavior), so the initial render must be a
-		// literal 100% zoom, not Fit; Fit is a user choice.
-		bool fitMode = false;
-		double zoomScale = 1.0;
-
 		/// <summary>A Thumb template that draws nothing but a transparent hit-target fill, so the
-		/// thumb stays invisible while still receiving mouse input - see moveThumb's own comment
-		/// on why relying on the theme's default Thumb template is not safe here.</summary>
+		/// thumb stays invisible while still receiving mouse input. The default WPF Thumb theme
+		/// template paints its chrome from SystemColors brushes, not from TemplateBinding Background,
+		/// so Background=Transparent alone does nothing: under the dark theme that chrome rendered as
+		/// an opaque dark rectangle over the whole selected control.</summary>
 		static ControlTemplate CreateTransparentThumbTemplate()
 		{
 			var surface = new FrameworkElementFactory(typeof(Border));
@@ -283,80 +221,40 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			return new ControlTemplate(typeof(Thumb)) { VisualTree = surface };
 		}
 
-		void RebuildViewport()
-		{
-			if (state?.Render == null)
-				return;
-			// Re-derive the viewport from the current toolbar zoom and re-present. This must
-			// not go through Show's frame-sequence guard - a zoom change replays the same
-			// SessionState (same Sequence), so the guard would early-return and the zoom would
-			// never take effect.
-			ApplyViewport();
-		}
-
+		/// <summary>
+		/// The WinForms designer on the shared design canvas (<see cref="DesignSurface"/> plus a
+		/// name-keyed <see cref="DesignSurfaceController"/>; doc/technotes/designer-canvas-addin.md).
+		/// The canvas draws the frame, zooms, selects (click, Ctrl-click, marquee), moves and resizes
+		/// with snapping; this class turns those gestures into the WinForms host's own edits
+		/// (<see cref="BoundsChanged"/>, <see cref="SelectionMoveRequested"/>) and keeps what only
+		/// WinForms has - tab headers, locked components, the ToolStrip editors and popups, smart
+		/// tags, the component tray - as extensions (its <see cref="DesignSurface.ExtensionLayer"/>
+		/// and the tray below the canvas).
+		/// </summary>
 		public RemoteFormsDesignerControl(FormsDesignerHostClient client, string backendName)
 		{
 			this.client = client;
-			Focusable = true;
 			BackendName = backendName;
+			controller = new DesignSurfaceController(this, this, DesignSurfaceKeying.Name);
+			adorners = ExtensionLayer;
 			Capabilities = DesignerCanvasCapabilities.Zoom | DesignerCanvasCapabilities.Fit
 				| DesignerCanvasCapabilities.StatusBar | DesignerCanvasCapabilities.ShowNames;
-			IsShowingNames = showComponentLabels;
-			ShowNamesRequested += (_, value) => {
-				showComponentLabels = value;
-				UpdateDesignGuides();
-			};
 			StatusText = $"Starting {BackendName} design host…";
-			// The shared DesignerCanvas shell provides the dotted empty-canvas edge pattern and
-			// the common zoom toolbar; the design surface is transparent so the edge pattern
-			// shows around the rendered form bitmap.
+			// Undo/redo is an IDE command for this designer, and Delete, arrows, Tab, Esc, F2 and
+			// Ctrl+. are its own (OnKeyDown): the canvas must not consume them first. Right-click
+			// raises ContextMenuRequested, and the host builds that menu from the designer verbs.
+			HandlesUndoRedoKeys = false;
+			ContextMenu = null;
+			// A tab header is painted by its TabControl and is not a component: a press on one
+			// switches the page instead of starting a selection or drag.
+			DesignPressInterceptor = TryInterceptTabHeaderPress;
 
-			designSurface.Children.Add(framePresenter.Visual);
-			guides = new Canvas { IsHitTestVisible = false };
-			designSurface.Children.Add(guides);
-			designSurface.Children.Add(snapGuideOverlay);
-			adorners = new Canvas { IsHitTestVisible = true };
 			// A native ToolStrip template node is rendered into the bitmap, while this
 			// transparent WPF proxy is only an input target. Route by its transformed bounds
 			// at the adorner root as well: an invisible Border can lose the ordinary bubbling
 			// hit test when a selected strip's Thumb overlaps it.
 			adorners.AddHandler(UIElement.PreviewMouseLeftButtonDownEvent,
 				new MouseButtonEventHandler(OnAdornerPreviewMouseLeftButtonDown), true);
-			marqueeBorder = new Rectangle {
-				Stroke = SelectionBrush, StrokeThickness = 1,
-				Fill = new SolidColorBrush(Color.FromArgb(35, 0x00, 0x78, 0xD4)),
-				StrokeDashArray = new DoubleCollection { 3, 2 }, IsHitTestVisible = false,
-				Visibility = Visibility.Collapsed
-			};
-			// moveThumb covers the WHOLE selected control and exists only as an invisible drag
-			// target (the visible outline is drawn by adornerLayer). Its Template must be set
-			// explicitly: the default WPF Thumb theme template paints its chrome from
-			// SystemColors brushes, NOT from TemplateBinding Background, so setting
-			// Background=Transparent alone does nothing. Under this app's dark theme (whose
-			// Theme.Dark.xaml overrides ControlBrushKey/ControlLightLightColorKey to #252526 /
-			// #333337) that chrome rendered as an OPAQUE DARK rectangle over the entire selected
-			// control - the "selecting a Panel turns it black" bug, located with DevFlow's
-			// ui/tree: the Thumb's inner template Borders reported background #252526/#333337
-			// at exactly the panel's rect, on top of the rendered form bitmap.
-			moveThumb = new Thumb {
-				Background = Brushes.Transparent,
-				Cursor = Cursors.SizeAll,
-				Visibility = Visibility.Collapsed,
-				Template = CreateTransparentThumbTemplate()
-			};
-			// moveThumb is drawn across the SELECTED component's whole bounds - which, for a
-			// TabControl, includes its header strip (the header is visually part of the control's
-			// own bounding rect). A plain SizeAll cursor there would advertise "drag to move" over
-			// an area that actually switches tabs on click and never actually moves anything - so
-			// swap to a plain pointer whenever the mouse sits over one of the reported
-			// TabHeaderBounds, matching what a click there will really do.
-			moveThumb.MouseMove += (sender, args) => {
-				var point = args.GetPosition(framePresenter.Visual);
-				var designPoint = new Point(point.X / viewport.Scale, point.Y / viewport.Scale);
-				var overHeader = selectedComponent?.TabHeaderBounds.Any(rect =>
-					new Rect(rect.X, rect.Y, rect.Width, rect.Height).Contains(designPoint)) == true;
-				moveThumb.Cursor = overHeader ? Cursors.Arrow : Cursors.SizeAll;
-			};
 			reorderThumb = new Thumb {
 				Background = Brushes.Transparent,
 				Cursor = Cursors.SizeWE,
@@ -372,24 +270,9 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			insertionLine = new Rectangle {
 				Fill = SelectionBrush, Visibility = Visibility.Collapsed, IsHitTestVisible = false
 			};
-			resizeThumb = new Thumb { Width = 8, Height = 8, Background = Brushes.White, BorderBrush = SelectionBrush, BorderThickness = new Thickness(1), Cursor = Cursors.SizeNWSE, Visibility = Visibility.Collapsed };
-			// Keep the conventional 8px visual handle while providing a forgiving transparent
-			// input target around it.  At fractional DPI a real pointer can land one or two device
-			// pixels off the visible square; without this, ScrollViewer sees the gesture instead of
-			// the resize Thumb and scrolls the canvas rather than resizing the selected component.
-			resizeHitTarget = new Thumb {
-				Width = 20, Height = 20, Background = Brushes.Transparent,
-				Cursor = Cursors.SizeNWSE, Visibility = Visibility.Collapsed,
-				Template = CreateTransparentThumbTemplate()
-			};
-			adorners.Children.Add(marqueeBorder);
-			adorners.Children.Add(adornerLayer.Visual);
-			adorners.Children.Add(moveThumb);
 			adorners.Children.Add(reorderThumb);
 			adorners.Children.Add(popupReorderThumb);
 			adorners.Children.Add(insertionLine);
-			adorners.Children.Add(resizeHitTarget);
-			adorners.Children.Add(resizeThumb);
 			smartTagChevron = CreateSmartTagGlyph();
 			smartTagChevron.MouseLeftButtonDown += (sender, args) => {
 				args.Handled = true;
@@ -439,7 +322,7 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			adorners.Children.Add(toolStripInsertChevron);
 			adorners.Children.Add(typeHereCell);
 			adorners.Children.Add(renameEditor);
-			designSurface.Children.Add(adorners);
+
 			disconnectedText = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12) };
 			var restartButton = new Button { Content = "Restart designer", HorizontalAlignment = HorizontalAlignment.Left, Padding = new Thickness(12, 5, 12, 5) };
 			restartButton.Click += (sender, args) => RestartRequested?.Invoke(this, EventArgs.Empty);
@@ -451,87 +334,46 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 				Visibility = Visibility.Collapsed,
 				Child = new StackPanel { Children = { disconnectedText, restartButton } }
 			};
-			designSurface.Children.Add(disconnectedOverlay);
-			// A form can be resized beyond the visible design tab.  Hosting the surface in a
-			// ScrollViewer lets the canvas grow with it instead of clipping the bottom-right
-			// Thumb (and, consequently, releasing a resize drag outside the canvas).
-			scrollContent.Children.Add(designSurface);
-			scroller.Content = scrollContent;
+
 			trayRegion = new Border {
 				BorderThickness = new Thickness(0, 1, 0, 0),
-				BorderBrush = new SolidColorBrush(Color.FromRgb(0xC0, 0xC0, 0xC0)),
-				Background = new SolidColorBrush(Color.FromRgb(0xF5, 0xF5, 0xF5)),
-				Height = TrayHeight,
+				// Height follows the rows (Auto); past TrayMaxVisibleRows the tray scrolls.
+				MaxHeight = TrayMaxVisibleRows * TrayCellHeight + 2 * TrayPadding + 1,
 				Visibility = Visibility.Collapsed,
 				// The tray's own scrollbar: item layout is fixed-size, so a form with many
 				// components scrolls the tray without touching the design surface's own scroll
 				// position or zoom.
-				Child = new ScrollViewer {
-					VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-					HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-					Content = trayItems
-				}
+				Child = trayScroller
 			};
+			trayScroller.Content = trayItems;
+			trayScroller.SizeChanged += (_, _) => LayoutTrayCells();
+			// Theme brushes, not fixed light colors: under the dark theme the entries' text follows
+			// the IDE foreground, which was unreadable on a hard-coded light gray.
+			trayRegion.SetResourceReference(Border.BackgroundProperty, "ToolWindowBackground");
+			trayRegion.SetResourceReference(Border.BorderBrushProperty, "Border");
+			trayRegion.SetResourceReference(TextElement.ForegroundProperty, "Foreground");
 			// The tray's own background menu. Registered on trayRegion rather than on trayItems so
 			// the whole strip responds, including the empty space below a short row of entries, and
-			// it fires only when no entry handled the press first. The design surface's own
-			// right-click handler also sees this press (it is registered with handledEventsToo) but
-			// bails out on IsOutsideDesignSurface, which already counts the tray as chrome - so
-			// there is exactly one menu, not two.
+			// it fires only when no entry handled the press first.
 			trayRegion.MouseRightButtonDown += (_, args) => {
 				args.Handled = true;
 				TrayContextMenuRequested?.Invoke(this, new RemoteComponentEventArgs(String.Empty));
 			};
+			// The component tray is deliberately a SIBLING of the zoomable canvas rather than part
+			// of its content, mirroring how the real designer hosts ComponentTray through
+			// ISplitWindowService.AddSplitWindow: it keeps its own scrollbar and fixed item size.
+			canvasScroller = (ScrollViewer)ContentHost.Content;
+			ContentHost.Content = null;
+			var canvasArea = new Grid { Children = { canvasScroller, disconnectedOverlay } };
 			var contentLayout = new Grid();
 			contentLayout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 			contentLayout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-			Grid.SetRow(scroller, 0);
+			Grid.SetRow(canvasArea, 0);
 			Grid.SetRow(trayRegion, 1);
-			contentLayout.Children.Add(scroller);
+			contentLayout.Children.Add(canvasArea);
 			contentLayout.Children.Add(trayRegion);
 			ContentHost.Content = contentLayout;
 
-			// Only controls backed by this designer are visible. Editing commands remain in the
-			// IDE command system; grid/theme/name/device controls are not inert toolbar chrome.
-			foreach (var label in ZoomLabels)
-				ZoomCombo.Items.Add(label);
-			ZoomCombo.SelectedIndex = 4; // 100%
-			ZoomChanged += (_, _) => {
-				var index = ZoomCombo.SelectedIndex;
-				if (index <= 0) {
-					fitMode = true;
-				} else {
-					fitMode = false;
-					zoomScale = ZoomPresets[index - 1];
-				}
-				RebuildViewport();
-			};
-			FitRequested += (_, _) => { fitMode = true; RebuildViewport(); };
-
-			AllowDrop = true;
-			// handledEventsToo, NOT a plain += handler: the ScrollViewer between the frame image
-			// and this control marks MouseLeftButtonDown handled on its way up, so a bubbling
-			// handler registered the normal way never ran at all and click-to-select on the canvas
-			// could never work (only the Document Outline could change the selection). The
-			// resize gesture already worked around the same swallowing with a Preview handler.
-			AddHandler(MouseLeftButtonDownEvent, new MouseButtonEventHandler(OnMouseLeftButtonDown), true);
-			// Same handledEventsToo requirement as MouseLeftButtonDown above: the ScrollViewer
-			// swallows bubbling Move/Up too, so a plain += here left marqueeSelecting stuck true
-			// (and the mouse still captured) forever after the FIRST click that missed every
-			// known component's rect - silently breaking every subsequent click-to-select attempt,
-			// not just marquee-drag, since OnMouseLeftButtonDown's own early-return guard bails
-			// out whenever marqueeSelecting is still true.
-			AddHandler(MouseMoveEvent, new MouseEventHandler(OnMouseMove), true);
-			AddHandler(MouseLeftButtonUpEvent, new MouseButtonEventHandler(OnMouseLeftButtonUp), true);
-			// The ScrollViewer hosting the expandable canvas can consume bubbling mouse events.
-			// Preview handlers keep the root-form resize gesture reachable even after scrollbars
-			// appear, matching the WPF/WinUI designer surfaces' input-routing strategy.
-			PreviewMouseLeftButtonDown += OnPreviewMouseLeftButtonDown;
-			PreviewMouseMove += OnPreviewMouseMove;
-			PreviewMouseLeftButtonUp += OnPreviewMouseLeftButtonUp;
-			moveThumb.DragStarted += OnDragStarted;
-			moveThumb.DragDelta += OnMoveDragDelta;
-			moveThumb.DragCompleted += OnDragCompleted;
 			reorderThumb.DragStarted += (_, _) => { reorderDragDeltaX = 0; ShowReorderInsertionLine(vertical: false, 0); };
 			reorderThumb.DragDelta += (_, e) => { reorderDragDeltaX += e.HorizontalChange; ShowReorderInsertionLine(vertical: false, reorderDragDeltaX); };
 			reorderThumb.DragCompleted += (sender, e) => { insertionLine.Visibility = Visibility.Collapsed; OnReorderDragCompleted(sender, e); };
@@ -548,20 +390,216 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			popupReorderThumb.DragStarted += (_, _) => { popupReorderDeltaY = 0; ShowReorderInsertionLine(vertical: true, 0); };
 			popupReorderThumb.DragDelta += (_, e) => { popupReorderDeltaY += e.VerticalChange; ShowReorderInsertionLine(vertical: true, popupReorderDeltaY); };
 			popupReorderThumb.DragCompleted += (sender, e) => { insertionLine.Visibility = Visibility.Collapsed; OnPopupReorderDragCompleted(sender, e); };
-			resizeThumb.DragStarted += OnDragStarted;
-			resizeThumb.DragDelta += OnResizeDragDelta;
-			resizeThumb.DragCompleted += OnDragCompleted;
-			resizeHitTarget.DragStarted += OnDragStarted;
-			resizeHitTarget.DragDelta += OnResizeDragDelta;
-			resizeHitTarget.DragCompleted += OnDragCompleted;
+
+			controller.SelectionChanged += (_, names) => OnCanvasSelectionChanged(names);
+			controller.ElementPicked += (_, name) => {
+				// A drag started on an element that is not selected yet selects it first.
+				if (!selectedComponentNames.Contains(name))
+					SelectSingleComponent(name, takeFocus: false);
+			};
+			controller.ElementDragCommitted += (_, drag) => CommitCanvasDrag(drag);
+			controller.ElementGroupDragCommitted += (_, moves) => CommitCanvasGroupDrag(moves);
+			controller.ElementDoubleClicked += (_, info) => {
+				if (info != null && !String.IsNullOrEmpty(info.Name))
+					DefaultEventRequested?.Invoke(this, new RemoteComponentEventArgs(info.Name));
+			};
+			ViewportChanged += (_, _) => {
+				PositionPopupOverlays();
+				if (selectedComponent != null)
+					PositionAdorners();
+			};
+
+			AllowDrop = true;
 			DragOver += OnDragOver;
 			Drop += OnDrop;
-			KeyDown += OnKeyDown;
-			// handledEventsToo, same reasoning as the left-button handler: an adorner glyph drawn
-			// over the selection would otherwise swallow the press before the canvas sees it, and
-			// right-clicking a selected TabControl - whose move thumb covers its whole bounds -
-			// is exactly how Add Tab/Remove Tab get reached.
-			AddHandler(MouseRightButtonDownEvent, new MouseButtonEventHandler(OnMouseRightButtonDown), true);
+			PreviewKeyDown += OnKeyDown;
+			PreviewMouseRightButtonDown += OnCanvasRightButtonDown;
+		}
+
+		readonly DesignSurfaceController controller;
+
+		/// <summary>Why the last canvas click selected what it did (DevFlow).</summary>
+		internal string LastPickDiagnostic => controller.LastPickDiagnostic;
+		readonly ScrollViewer canvasScroller;
+		/// <summary>Each synthesized tree node's path, by component name - the canvas's hit test
+		/// answers with a path (see <see cref="CanvasSnapshot"/>).</summary>
+		Dictionary<string, string> pathByName = new(StringComparer.Ordinal);
+
+		/// <summary>Design point to <see cref="DesignSurface.ExtensionLayer"/> coordinates.</summary>
+		(double X, double Y) ToContent(double x, double y)
+		{
+			var point = DesignToContentPoint(x, y);
+			return (point.X, point.Y);
+		}
+
+		/// <summary>
+		/// The session state as the canvas wants it: the host's flat component list (whose
+		/// SurfaceX/SurfaceY are already in the rendered frame's space) turned into an element tree
+		/// with absolute bounds, keyed by component name. The host's own Tree carries parent-relative
+		/// Location values, which the canvas cannot place. Tray-only components (no parent) have no
+		/// place on the surface and are left out; the frame is passed on only when it is new.
+		/// </summary>
+		DesignerSessionState CanvasSnapshot(DesignerSessionState session)
+		{
+			var components = session.Components ?? new List<DesignerComponentInfo>();
+			var root = components.FirstOrDefault(item => item.Name == session.Tree?.Name)
+				?? components.FirstOrDefault(item => String.IsNullOrEmpty(item.Parent) && item.IsControl && !item.IsTrayComponent);
+			var children = components.Where(item => !String.IsNullOrEmpty(item.Parent))
+				.GroupBy(item => item.Parent, StringComparer.Ordinal)
+				.ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+			var paths = new Dictionary<string, string>(StringComparer.Ordinal);
+			DesignerElementNode Build(DesignerComponentInfo component, string path, int depth)
+			{
+				paths[component.Name] = path;
+				var node = new DesignerElementNode {
+					Id = component.Name,
+					Name = component.Name,
+					Type = component.Type,
+					X = component.SurfaceX,
+					Y = component.SurfaceY,
+					Width = component.Width,
+					Height = component.Height,
+					Path = path,
+					IsDesignable = true,
+					IsVisible = component.IsVisible
+				};
+				// TabIndex is all the tab-order badges read; the root has no badge.
+				if (depth > 0 && component.Properties.FirstOrDefault(item => item.Name == "TabIndex") is { } tabIndex)
+					node.Properties.Add(new DesignerPropertyInfo { Name = "TabIndex", Value = tabIndex.Value });
+				if (depth < 64 && children.TryGetValue(component.Name, out var list)) {
+					for (var index = 0; index < list.Count; index++)
+						node.Children.Add(Build(list[index], path.Length == 0 ? index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+							: path + "," + index.ToString(System.Globalization.CultureInfo.InvariantCulture), depth + 1));
+				}
+				return node;
+			}
+			var tree = root == null ? null : Build(root, "", 0);
+			pathByName = paths;
+			DesignerRenderFrame frame = null;
+			if (session.Render != null && (!String.IsNullOrEmpty(session.Render.Data) || !String.IsNullOrEmpty(session.Render.PngBase64))
+				&& (session.Render.Sequence <= 0 || session.Render.Sequence > lastFrameSequence)) {
+				frame = session.Render;
+				lastFrameSequence = session.Render.Sequence;
+			}
+			return new DesignerSessionState {
+				SessionId = session.SessionId,
+				DocumentId = session.DocumentId,
+				Version = session.Version,
+				Accepted = true,
+				Render = frame,
+				Tree = tree
+			};
+		}
+
+		/// <summary>Answers the canvas's hit test from the design host (<c>design/hit-test</c>).
+		/// Off the dispatcher thread, so the RPC's continuation cannot need the thread it blocks.</summary>
+		DesignCanvasHit IDesignCanvasBackend.HitTest(double x, double y)
+		{
+			if (state == null)
+				return null;
+			var result = Task.Run(() => client.HitTestAsync(version, (int)x, (int)y, CancellationToken.None)).GetAwaiter().GetResult();
+			var name = result.ComponentName;
+			if (String.IsNullOrEmpty(name))
+				return new DesignCanvasHit(false, null, Array.Empty<string>());
+			return pathByName.TryGetValue(name, out var path)
+				? new DesignCanvasHit(true, path, new[] { name })
+				: new DesignCanvasHit(false, null, new[] { name });
+		}
+
+		/// <summary>The canvas changed the selection (click, Ctrl-click, marquee): mirror it into
+		/// this designer's own selection, which the host, the Properties pad and the tray follow.</summary>
+		void OnCanvasSelectionChanged(IReadOnlyList<string> names)
+		{
+			selectedComponentNames.Clear();
+			foreach (var name in names)
+				selectedComponentNames.Add(name);
+			SelectedComponentName = names.FirstOrDefault() ?? "";
+			selectedComponent = state?.Components?.FirstOrDefault(item => item.Name == SelectedComponentName);
+			UpdateAdorners();
+			Focus();
+			SelectionChanged?.Invoke(this, EventArgs.Empty);
+			if (selectedComponent != null)
+				_ = EnsureAncestorTabActiveAsync(selectedComponent);
+		}
+
+		/// <summary>Pushes this designer's selection to the canvas outline (primary first) without
+		/// the canvas announcing it back. Tray-only components have no outline.</summary>
+		void UpdateDesignGuides() => controller.RestoreSelection(SelectedComponentNames);
+
+		/// <summary>A committed canvas move or resize. A move goes through the designer's own
+		/// selection move (<see cref="SelectionMoveRequested"/>, which also carries its snapping to
+		/// the grid and its undo unit); a resize through <see cref="BoundsChanged"/>, in the
+		/// component's parent-relative coordinates. A locked component (bar the root's size) and a
+		/// ToolStripItem, which is not a Control, cannot be dragged: the outline snaps back.</summary>
+		void CommitCanvasDrag(ElementDragInfo drag)
+		{
+			var component = state?.Components?.FirstOrDefault(item => item.Name == drag.Name);
+			var isRoot = component != null && String.IsNullOrEmpty(component.Parent);
+			if (component == null || !component.IsControl || (!isRoot && lockedComponentNames.Contains(component.Name))) {
+				UpdateDesignGuides();
+				return;
+			}
+			var resized = Math.Abs(drag.EndWidth - drag.StartWidth) >= 0.5 || Math.Abs(drag.EndHeight - drag.StartHeight) >= 0.5;
+			if (!resized) {
+				var dx = (int)Math.Round(drag.EndX - drag.StartX);
+				var dy = (int)Math.Round(drag.EndY - drag.StartY);
+				if (dx != 0 || dy != 0)
+					SelectionMoveRequested?.Invoke(this, new RemoteSelectionMoveEventArgs(dx, dy));
+				else
+					UpdateDesignGuides();
+				return;
+			}
+			BoundsChanged?.Invoke(this, new RemoteBoundsChangedEventArgs(component.Name,
+				component.X + (int)Math.Round(drag.EndX - component.SurfaceX),
+				component.Y + (int)Math.Round(drag.EndY - component.SurfaceY),
+				(int)Math.Round(drag.EndWidth), (int)Math.Round(drag.EndHeight)));
+		}
+
+		/// <summary>A multi-selection moved together: one selection move, unless any member is
+		/// locked or not a Control.</summary>
+		void CommitCanvasGroupDrag(IReadOnlyList<(string Name, double DX, double DY)> moves)
+		{
+			var blocked = moves.Any(move => lockedComponentNames.Contains(move.Name)
+				|| state?.Components?.FirstOrDefault(item => item.Name == move.Name)?.IsControl != true);
+			var first = moves.FirstOrDefault();
+			var dx = (int)Math.Round(first.DX);
+			var dy = (int)Math.Round(first.DY);
+			if (blocked || (dx == 0 && dy == 0)) {
+				UpdateDesignGuides();
+				return;
+			}
+			SelectionMoveRequested?.Invoke(this, new RemoteSelectionMoveEventArgs(dx, dy));
+		}
+
+		/// <summary>The canvas's press hook: a tab header switches its TabControl's page.</summary>
+		bool TryInterceptTabHeaderPress(Point designPoint)
+		{
+			if (state?.Components == null || Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) || Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+				return false;
+			var onHeader = state.Components.Any(component => component.TabHeaderBounds.Any(bounds =>
+				new Rect(bounds.X, bounds.Y, bounds.Width, bounds.Height).Contains(designPoint)));
+			if (!onHeader)
+				return false;
+			_ = SwitchTabAt(designPoint);
+			return true;
+		}
+
+		async Task SwitchTabAt(Point designPoint)
+		{
+			try {
+				await TrySwitchTabAsync(designPoint);
+			} catch (Exception exception) {
+				ICSharpCode.Core.LoggingService.Warn("RemoteFormsDesignerControl.SwitchTabAt: " + exception.Message);
+			}
+		}
+
+		static bool IsWithin(object source, DependencyObject ancestor)
+		{
+			for (var node = source as DependencyObject; node != null; node = VisualTreeHelper.GetParent(node)) {
+				if (ReferenceEquals(node, ancestor))
+					return true;
+			}
+			return false;
 		}
 
 		void OnAdornerPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs args)
@@ -579,31 +617,18 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 
 		public string SelectedComponentName { get; private set; } = "";
 
-		/// <summary>
-		/// Surface geometry for the integration tests' resize-drag assertions: the rendered form
-		/// bitmap bounds, the current selection outline bounds, the selected element's bounds and
-		/// the bottom-right resize handle position - all in screen coordinates. The selection
-		/// outline must coincide with the rendered form (and the handle sit at its bottom-right
-		/// corner) both before and after a resize drag; this is the smoke probe for that
-		/// invariant.
-		/// </summary>
-		public DesignerSurfaceGeometry SurfaceGeometry()
+		/// <summary>Sets the view: "fit", or an absolute zoom ("1" = 100%). Returns the toolbar's
+		/// resulting zoom label.</summary>
+		public string SetZoom(string value)
 		{
-			var frame = DesignerSurfaceGeometryProbe.ScreenBoundsOf(framePresenter.Visual);
-			Rect selection = default;
-			if (selectedComponent != null)
-			{
-				selection = DesignerSurfaceGeometryProbe.DesignRectToScreen(viewport,
-					new Rect(selectedComponent.SurfaceX, selectedComponent.SurfaceY,
-						selectedComponent.Width, selectedComponent.Height),
-					designSurface);
-			}
-			var resizeBounds = DesignerSurfaceGeometryProbe.ScreenBoundsOf(resizeThumb);
-			var handle = resizeBounds.IsEmpty
-				? new Point(selection.X + selection.Width, selection.Y + selection.Height)
-				: new Point(resizeBounds.X + resizeBounds.Width / 2, resizeBounds.Y + resizeBounds.Height / 2);
-			return new DesignerSurfaceGeometry(frame, selection, handle, selection);
+			if (String.Equals(value, "fit", StringComparison.OrdinalIgnoreCase))
+				FitView();
+			else if (Double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var zoom))
+				SetViewport(zoom, 0, 0);
+			UpdateLayout();
+			return ZoomCombo.SelectedItem as string;
 		}
+
 		public string[] SelectedComponentNames => String.IsNullOrEmpty(SelectedComponentName)
 			? selectedComponentNames.ToArray()
 			: new[] { SelectedComponentName }.Concat(selectedComponentNames.Where(name => name != SelectedComponentName)).ToArray();
@@ -650,7 +675,7 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 		internal void RaiseToolStripTypeHereCommitted(RemoteToolStripTypeHereEventArgs e) => ToolStripTypeHereCommitted?.Invoke(this, e);
 
 		/// <summary>A small clickable glyph, drawn as a plain Border rather than a Button - see
-		/// moveThumb's template comment on why a real Button/Thumb's default theme chrome cannot
+		/// CreateTransparentThumbTemplate on why a real Button/Thumb's default theme chrome cannot
 		/// be trusted to stay transparent under this app's dark theme.</summary>
 		static Border CreateChevronGlyph(string glyph, Brush foreground) => new Border {
 			Width = 9, Height = 9,
@@ -886,77 +911,33 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			disconnectedOverlay.Visibility = Visibility.Collapsed;
 			this.state = state;
 			version = state.Version;
-			// Before the frame-freshness early-returns below: the tray's contents come from the
-			// component list, not from the rendered bitmap, so a state that carries no new frame
-			// (or no frame at all) still has to refresh it.
+			// The tray's contents come from the component list, not from the rendered bitmap, so a
+			// state that carries no new frame (or no frame at all) still has to refresh it.
 			UpdateComponentTray();
+			var snapshot = CanvasSnapshot(state);
+			// Selectable on the surface: every placed component and the root form. Items inside an
+			// open dropdown are selected through their popup overlay instead (OnPopupClicked).
+			controller.SetSelectableNames((state.Components ?? new List<DesignerComponentInfo>())
+				.Where(item => pathByName.ContainsKey(item.Name) && !item.IsDropDownItem)
+				.Select(item => item.Name));
+			controller.ApplySnapshot(snapshot);
+			if (snapshot.Render is { } frame) {
+				var dpiForStatus = Math.Max(1, frame.Dpi);
+				StatusText = $"Rendered by {BackendName} design host ({frame.Width / dpiForStatus:0}×{frame.Height / dpiForStatus:0}).";
+			}
 			UpdatePopupOverlays(state);
-			if (state.Render == null || (String.IsNullOrEmpty(state.Render.PngBase64) && String.IsNullOrEmpty(state.Render.Data))) {
-				return;
-			}
-			if (state.Render.Sequence > 0 && state.Render.Sequence <= lastFrameSequence) {
-				return;
-			}
-			lastFrameSequence = state.Render.Sequence;
-			var dpiForStatus = Math.Max(1, state.Render.Dpi);
-			StatusText = $"Rendered by {BackendName} design host ({state.Render.Width / dpiForStatus:0}×{state.Render.Height / dpiForStatus:0}).";
-			ImageSource bitmap;
-			if (!String.IsNullOrEmpty(state.Render.Data)) {
-				var pixels = DesignerFrameCodec.DecodeBgra32(state.Render);
-				bitmap = BitmapSource.Create(state.Render.Width, state.Render.Height, 96, 96,
-					PixelFormats.Bgra32, null, pixels, state.Render.Width * 4);
-				bitmap.Freeze();
-			} else {
-				var png = new BitmapImage();
-				using (var stream = new MemoryStream(Convert.FromBase64String(state.Render.PngBase64))) {
-					png.BeginInit();
-					png.CacheOption = BitmapCacheOption.OnLoad;
-					png.StreamSource = stream;
-					png.EndInit();
-					png.Freeze();
-				}
-				bitmap = png;
-			}
-			framePresenter.SetSource(bitmap);
-			ApplyViewport();
-			if (!String.IsNullOrEmpty(SelectedComponentName)) {
-				selectedComponent = state.Components.FirstOrDefault(item => item.Name == SelectedComponentName);
-				selectedComponentNames.RemoveWhere(name => !state.Components.Any(item => item.Name == name));
-				lockedComponentNames.RemoveWhere(name => !state.Components.Any(item => item.Name == name));
-				UpdateAdorners();
-			}
+			selectedComponentNames.RemoveWhere(name => state.Components?.Any(item => item.Name == name) != true);
+			lockedComponentNames.RemoveWhere(name => state.Components?.Any(item => item.Name == name) != true);
+			if (!selectedComponentNames.Contains(SelectedComponentName))
+				SelectedComponentName = selectedComponentNames.FirstOrDefault() ?? "";
+			selectedComponent = String.IsNullOrEmpty(SelectedComponentName) ? null
+				: state.Components?.FirstOrDefault(item => item.Name == SelectedComponentName);
+			UpdateDesignGuides();
+			UpdateAdorners();
 			AutomationProperties.SetName(this, selectedComponent?.AccessibleName ?? "WinForms designer");
 			AutomationProperties.SetHelpText(this, selectedComponent?.AccessibleDescription ?? "");
 		}
 
-		void ApplyViewport()
-		{
-			var dpi = Math.Max(1, state.Render.Dpi);
-			var designWidth = state.Render.Width / dpi;
-			var designHeight = state.Render.Height / dpi;
-			// Fit/zoom inside an inset area, then shift everything back out by the same margin
-			// through the viewport's own pan - so the frame bitmap, the guide overlay and every
-			// DesignToSurface-based adorner all move together and stay aligned (matches
-			// WpfSurfaceDesignerControl's identical CanvasPadding treatment).
-			var availableWidth = Math.Max(0, scroller.ViewportWidth - 2 * CanvasMargin);
-			var availableHeight = Math.Max(0, scroller.ViewportHeight - 2 * CanvasMargin);
-			if (fitMode)
-				viewport = DesignViewport.Fit(designWidth, designHeight, availableWidth, availableHeight, 1.0, CanvasMargin, CanvasMargin);
-			else
-				viewport = DesignViewport.Zoom(designWidth, designHeight, availableWidth, availableHeight, zoomScale, CanvasMargin, CanvasMargin);
-			framePresenter.Resize(viewport);
-			// The rendered form must sit at the viewport's base (centered-fit origin + pan),
-			// exactly where the DesignToSurface-based guides/adorners are placed - otherwise the
-			// selection outline and the bitmap drift apart whenever Scale != 1.
-			framePresenter.Visual.Margin = new Thickness(
-				Math.Max(0, viewport.OriginX) + viewport.PanX,
-				Math.Max(0, viewport.OriginY) + viewport.PanY, 0, 0);
-			UpdateCanvasExtent();
-			UpdateDesignGuides();
-			PositionPopupOverlays();
-			if (selectedComponent != null)
-				UpdateAdorners();
-		}
 
 		/// <summary>Reconciles the live <see cref="popupOverlays"/> against
 		/// <c>state.Popups</c>: keeps the same Image (and therefore any in-progress interaction)
@@ -1025,21 +1006,23 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 		}
 
 		/// <summary>Places every live popup overlay at its reported surface position, sized by the
-		/// current zoom - the same DesignToSurface basis every other adorner uses, so a popup
-		/// stays visually attached to the strip it belongs to at any zoom level.</summary>
+		/// current zoom, in the canvas's extension layer - so a popup stays visually attached to the
+		/// strip it belongs to at any zoom level.</summary>
 		void PositionPopupOverlays()
 		{
 			foreach (var image in popupOverlays.Values) {
 				if (image.Tag is not DesignerPopupFrame popup || popup.Render == null)
 					continue;
-				var (left, top) = viewport.DesignToSurface(popup.X, popup.Y);
+				var (left, top) = ToContent(popup.X, popup.Y);
 				Canvas.SetLeft(image, left);
 				Canvas.SetTop(image, top);
 				var dpi = Math.Max(1, popup.Render.Dpi);
-				image.Width = popup.Render.Width / dpi * viewport.Scale;
-				image.Height = popup.Render.Height / dpi * viewport.Scale;
-				if (popupEditors.TryGetValue(popup.OwnerElementId, out var editor))
-					editor.Reposition(viewport, popup.X, popup.Y);
+				image.Width = popup.Render.Width / dpi * ViewportScale;
+				image.Height = popup.Render.Height / dpi * ViewportScale;
+				if (popupEditors.TryGetValue(popup.OwnerElementId, out var editor)) {
+					var (cellLeft, cellTop) = ToContent(popup.X + editor.Bounds.X, popup.Y + editor.Bounds.Y);
+					editor.Reposition(cellLeft, cellTop, ViewportScale);
+				}
 			}
 		}
 
@@ -1050,7 +1033,7 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			try {
 				Focus();
 				var point = args.GetPosition(image);
-				var designPoint = new Point(point.X / viewport.Scale, point.Y / viewport.Scale);
+				var designPoint = new Point(point.X / ViewportScale, point.Y / ViewportScale);
 				var result = await client.HitTestPopupAsync(version, ownerElementId, designPoint.X, designPoint.Y, CancellationToken.None);
 				if (!result.Accepted)
 					return;
@@ -1093,7 +1076,10 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			trayItems.Children.Clear();
 			trayRegion.Visibility = trayComponents.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
 			foreach (var component in trayComponents) {
-				var content = new StackPanel { Orientation = Orientation.Horizontal };
+				// Icon column + a name that trims to the cell rather than widening it.
+				var content = new Grid();
+				content.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+				content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 				var icon = TrayIconSource(component.Type);
 				if (icon != null) {
 					content.Children.Add(new Image {
@@ -1102,16 +1088,19 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 						VerticalAlignment = VerticalAlignment.Center
 					});
 				}
-				content.Children.Add(new TextBlock {
-					Text = component.Name, VerticalAlignment = VerticalAlignment.Center
-				});
+				var label = new TextBlock {
+					Text = component.Name, VerticalAlignment = VerticalAlignment.Center,
+					TextTrimming = TextTrimming.CharacterEllipsis
+				};
+				Grid.SetColumn(label, 1);
+				content.Children.Add(label);
 				var entry = new Border {
-					Padding = new Thickness(4, 3, 6, 3),
-					Margin = new Thickness(0, 0, 4, 3),
+					Padding = new Thickness(4, 2, 6, 2),
+					Margin = new Thickness(1),
 					CornerRadius = new CornerRadius(2),
 					BorderThickness = new Thickness(1),
 					Cursor = Cursors.Hand,
-					ToolTip = component.Type,
+					ToolTip = component.Name + " (" + component.Type + ")",
 					Tag = component.Name,
 					Child = content
 				};
@@ -1131,6 +1120,22 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 				trayItems.Children.Add(entry);
 			}
 			RefreshTrayHighlight();
+			LayoutTrayCells();
+		}
+
+		/// <summary>Splits the tray's width evenly into as many columns as fit at
+		/// <see cref="TrayMinCellWidth"/>, so every row is a row of equal cells that together fill
+		/// the width. Re-run whenever the tray is resized.</summary>
+		void LayoutTrayCells()
+		{
+			var available = trayScroller.ViewportWidth > 0 ? trayScroller.ViewportWidth : trayScroller.ActualWidth;
+			available -= 2 * TrayPadding;
+			if (available <= 0)
+				return;
+			var columns = Math.Max(1, (int)Math.Floor(available / TrayMinCellWidth));
+			var width = Math.Floor(available / columns);
+			if (!width.Equals(trayItems.ItemWidth))
+				trayItems.ItemWidth = width;
 		}
 
 		/// <summary>Repaints just the tray entries' selected state. Split out of
@@ -1142,7 +1147,13 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 				if (child is not Border entry || entry.Tag is not string name)
 					continue;
 				var selected = selectedComponentNames.Contains(name);
-				entry.Background = selected ? new SolidColorBrush(Color.FromRgb(0xCC, 0xE4, 0xF7)) : Brushes.Transparent;
+				if (selected) {
+					entry.SetResourceReference(Border.BackgroundProperty, "Selection");
+					entry.SetResourceReference(TextElement.ForegroundProperty, "SelectionForeground");
+				} else {
+					entry.Background = Brushes.Transparent;
+					entry.ClearValue(TextElement.ForegroundProperty);
+				}
 				entry.BorderBrush = selected ? SelectionBrush : Brushes.Transparent;
 			}
 		}
@@ -1172,90 +1183,8 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			}
 		}
 
-		void UpdateDesignGuides()
-		{
-			guides.Children.Clear();
-			if (state?.Render == null) return;
-			// The form outline must cover exactly the rendered bitmap, so both corners go
-			// through DesignToSurface (same space the frame sits in once zoomed/centered).
-			var (fx, fy) = viewport.DesignToSurface(0, 0);
-			var (fx2, fy2) = viewport.DesignToSurface(state.Render.Width / Math.Max(1, state.Render.Dpi),
-				state.Render.Height / Math.Max(1, state.Render.Dpi));
-			var formOutline = new Rectangle {
-				Width = Math.Max(1, fx2 - fx), Height = Math.Max(1, fy2 - fy),
-				Stroke = Brushes.Gray, StrokeThickness = 1
-			};
-			Canvas.SetLeft(formOutline, fx);
-			Canvas.SetTop(formOutline, fy);
-			guides.Children.Add(formOutline);
-			// Items inside an expanded dropdown are skipped: once the child pushes selection into
-			// the real designer, that dropdown is rendered by WinForms itself (with its own
-			// adorners), and drawing our dashed outline plus a name label on top of it just
-			// obscured the real menu text.
-			// item.IsVisible: a control on a TabPage that is not its TabControl's SelectedTab still
-			// reports the SurfaceX/Y it WOULD sit at, and every TabPage occupies the same rect - so
-			// drawing its outline/name tag anyway put phantom overlays exactly on top of whichever
-			// page really was showing. That is what made a correctly-rendered TabControl look like
-			// it was painting the wrong page's content, and why clicking one of those phantoms
-			// selected the enclosing TabPage instead (the child's own hit-test correctly refuses to
-			// resolve to a hidden control). See DesignerComponentInfo.IsVisible.
-			foreach (var component in state.Components.Where(item => !String.IsNullOrEmpty(item.Parent)
-				&& !item.IsDropDownItem && item.IsVisible)) {
-				var (surfaceX, surfaceY) = viewport.DesignToSurface(component.SurfaceX, component.SurfaceY);
-				var (surfaceX2, surfaceY2) = viewport.DesignToSurface(
-					component.SurfaceX + component.Width, component.SurfaceY + component.Height);
-				var outline = new Rectangle {
-					Width = Math.Max(1, surfaceX2 - surfaceX), Height = Math.Max(1, surfaceY2 - surfaceY),
-					Stroke = lockedComponentNames.Contains(component.Name) ? Brushes.DarkOrange
-						: selectedComponentNames.Contains(component.Name) ? SelectionBrush : new SolidColorBrush(Color.FromArgb(150, 80, 80, 80)),
-					StrokeThickness = selectedComponentNames.Contains(component.Name) ? 2 : 1,
-					StrokeDashArray = selectedComponentNames.Contains(component.Name) ? null : new DoubleCollection { 3, 2 }
-				};
-				Canvas.SetLeft(outline, surfaceX);
-				Canvas.SetTop(outline, surfaceY);
-				// Ordinary controls already appear in the host bitmap. Only selection needs
-				// an extra outline; outlining every control obscures the designed UI.
-				if (selectedComponentNames.Contains(component.Name))
-					guides.Children.Add(outline);
-				if (showComponentLabels && component.Height >= 18 && component.Width >= 35) {
-					// Outside/above the control's own bounds (matching WinUI's own out-of-process
-					// designer, whose selection/name label sits above the box rather than
-					// overlapping the control's content) - previously drawn INSIDE at
-					// (surfaceX + 2, surfaceY + 2), which covered up the control's own rendered
-					// content (e.g. a Button's Text) right where a user would look for it.
-					var label = new TextBlock {
-						Text = component.Name, FontSize = 10, Foreground = Brushes.White,
-						Background = new SolidColorBrush(Color.FromArgb(190, 80, 80, 80)),
-						Padding = new Thickness(2, 0, 2, 0)
-					};
-					// No exceptions, TabPages included: a label always sits above its own bounds, so
-					// the surface reads consistently. A TabPage's label therefore lands on its
-					// TabControl's tab strip, which is fine - a design-time name tag overlapping a
-					// tab header is not worth a special case (an earlier attempt to special-case it,
-					// first by drawing it inside the page and then by sliding it past the last
-					// header, only made TabPages read differently from everything else).
-					Canvas.SetLeft(label, surfaceX);
-					Canvas.SetTop(label, Math.Max(0, surfaceY - 15));
-					guides.Children.Add(label);
-				}
-				if (showTabOrder) {
-					var tabIndex = component.Properties.FirstOrDefault(item => item.Name == "TabIndex")?.Value ?? "?";
-					var badge = new Border {
-						Background = Brushes.RoyalBlue, CornerRadius = new CornerRadius(8), Padding = new Thickness(5, 1, 5, 1),
-						Child = new TextBlock { Text = tabIndex, Foreground = Brushes.White, FontWeight = FontWeights.Bold, FontSize = 11 }
-					};
-					Canvas.SetLeft(badge, surfaceX - 5);
-					Canvas.SetTop(badge, surfaceY - 8);
-					guides.Children.Add(badge);
-				}
-			}
-		}
 
-		public void SetTabOrderMode(bool value)
-		{
-			showTabOrder = value;
-			UpdateDesignGuides();
-		}
+		public void SetTabOrderMode(bool value) => controller.SetTabOrderMode(value);
 
 		public void SelectAllComponents()
 		{
@@ -1355,7 +1284,6 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			foreach (var name in selectedComponentNames) {
 				if (shouldLock) lockedComponentNames.Add(name); else lockedComponentNames.Remove(name);
 			}
-			UpdateDesignGuides();
 			UpdateAdorners();
 		}
 
@@ -1363,8 +1291,7 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 		{
 			disconnectedText.Text = message;
 			disconnectedOverlay.Visibility = Visibility.Visible;
-			adornerLayer.ClearSelection();
-			moveThumb.Visibility = resizeHitTarget.Visibility = resizeThumb.Visibility = Visibility.Collapsed;
+			controller.ClearSelection();
 			StatusText = message;
 		}
 
@@ -1372,7 +1299,7 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 		{
 			bounds = Rect.Empty;
 			var component = state?.Components?.FirstOrDefault(item => item.Name == componentName);
-			if (component == null || !framePresenter.Visual.IsVisible)
+			if (component == null || !HasRender)
 				return false;
 			bounds = SurfaceRectToScreen(component.SurfaceX, component.SurfaceY, component.Width, component.Height);
 			return true;
@@ -1390,7 +1317,7 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 		{
 			bounds = Rect.Empty;
 			var component = state?.Components?.FirstOrDefault(item => item.Name == tabControlName);
-			if (component == null || !framePresenter.Visual.IsVisible)
+			if (component == null || !HasRender)
 				return false;
 			if (tabIndex < 0 || tabIndex >= component.TabHeaderBounds.Count)
 				return false;
@@ -1399,177 +1326,18 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			return true;
 		}
 
-		/// <summary>Both corners through DesignToSurface so the reported rect tracks the (possibly
-		/// zoomed) design rect, then PointToScreen from the design surface grid.</summary>
+		/// <summary>A design rect in screen coordinates, through the canvas's own viewport.</summary>
 		Rect SurfaceRectToScreen(double surfaceX, double surfaceY, double width, double height)
 		{
-			var (x, y) = viewport.DesignToSurface(surfaceX, surfaceY);
-			var (x2, y2) = viewport.DesignToSurface(surfaceX + width, surfaceY + height);
-			var topLeft = designSurface.PointToScreen(new Point(x, y));
-			var bottomRight = designSurface.PointToScreen(new Point(x2, y2));
+			var topLeft = SurfacePointToScreen(surfaceX, surfaceY);
+			var bottomRight = SurfacePointToScreen(surfaceX + width, surfaceY + height);
 			return new Rect(topLeft.X, topLeft.Y, bottomRight.X - topLeft.X, bottomRight.Y - topLeft.Y);
 		}
 
-		/// <summary>Whether the press originated outside the design surface's own CONTENT - i.e.
-		/// anywhere in the surrounding chrome: the base DesignerCanvas' toolbar/status bar (Show
-		/// Names, zoom combo, ...), the component tray below the surface, or the hosting
-		/// ScrollViewer's own scrollbars. MUST be checked before anything else, because this
-		/// handler is registered with handledEventsToo (see the constructor), so it also sees every
-		/// press those unrelated controls already consumed. Without the check,
-		/// e.GetPosition(framePresenter.Visual) computes a nonsense point far outside any known
-		/// component and the handler starts a marquee-drag, whose zero-size completion then selects
-		/// the ROOT FORM and calls Focus() - which is how clicking the Show Names button appeared
-		/// to "move the canvas", how clicking a component-tray entry lost its selection a moment
-		/// later, and how clicking a canvas scrollbar jumped the selection to the form.
-		///
-		/// The boundary is deliberately `scrollContent` rather than `ContentHost` or `scroller`:
-		/// the tray is a sibling of the scroller inside ContentHost, and the scrollbars belong to
-		/// the ScrollViewer's own template rather than to its Content, so only the content subtree
-		/// is really "the surface". The empty canvas margin around the rendered form IS part of
-		/// that subtree (designSurface is sized to at least the viewport), so rubber-band
-		/// selection there keeps working.</summary>
-		bool IsOutsideDesignSurface(object source)
-		{
-			for (var node = source as DependencyObject; node != null; node = VisualTreeHelper.GetParent(node)) {
-				if (node == scrollContent) return false;
-			}
-			return true;
-		}
 
-		/// <summary>This document's components as click candidates for
-		/// <see cref="DesignSurfaceClickArbiter"/> - surface-space bounds, plus the Parent/IsVisible
-		/// facts it needs to tell "drill into a child" from "drag what is already selected" and to
-		/// ignore controls sitting on a TabPage that is not currently showing.</summary>
-		IReadOnlyList<DesignSurfaceClickCandidate> ClickCandidates()
-			=> state?.Components?.Select(component => new DesignSurfaceClickCandidate(
-					component.Name, component.Parent,
-					new Rect(component.SurfaceX, component.SurfaceY, component.Width, component.Height),
-					component.IsVisible)).ToList()
-				?? (IReadOnlyList<DesignSurfaceClickCandidate>)Array.Empty<DesignSurfaceClickCandidate>();
 
-		/// <summary>Whether the click originated on one of the adorner-layer glyphs (drag/resize
-		/// thumbs, smart tag, ToolStrip insert button), which handle their own clicks. Needed
-		/// because this handler is registered with handledEventsToo, so it also sees the presses
-		/// those glyphs already consumed.</summary>
-		bool IsAdornerSource(object source)
-		{
-			for (var node = source as DependencyObject; node != null; node = VisualTreeHelper.GetParent(node)) {
-				if (node == adorners) return true;
-				if (node == framePresenter.Visual) return false;
-			}
-			return false;
-		}
 
-		bool IsPopupSource(object source)
-		{
-			for (var node = source as DependencyObject; node != null; node = VisualTreeHelper.GetParent(node)) {
-				// typeHereCell (the MenuStrip/ContextMenuStrip top-level "Type Here" cell) needs the
-				// exact same unconditional protection renameEditor already gets here - without it,
-				// OnMouseLeftButtonDown's handledEventsToo:true handler still runs on every press
-				// inside the cell (including ones after BeginTypeHereEdit already focused
-				// typeHereEditor), and DesignSurfaceClickArbiter's drill-through rule - meant for
-				// clicking through a resize handle onto a genuinely more specific nested control -
-				// has no way to know this is an active text-input surface, not a passive adorner
-				// glyph. When the click point also happens to overlap a real sibling MenuItem's
-				// bounds (the cell sits right past the strip's last item), drillThrough comes back
-				// true, the arbiter falls through to SelectComponent, and this method's own
-				// unconditional Focus() call (after its own await) steals keyboard focus back from
-				// typeHereEditor moments after it was focused - which reads as "the box loses focus
-				// almost immediately and you can't type into it," a real reported bug.
-				if (ReferenceEquals(node, renameEditor) || ReferenceEquals(node, popupReorderThumb) || ReferenceEquals(node, typeHereCell)) return true;
-				if (popupOverlays.Values.Any(image => ReferenceEquals(image, node))
-					|| popupEditors.Values.Any(editor => ReferenceEquals(editor.Cell, node)))
-					return true;
-			}
-			return false;
-		}
 
-		async void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-		{
-			try {
-				if (IsPopupSource(e.OriginalSource) || IsOutsideDesignSurface(e.OriginalSource))
-					return;
-				var extendSelection = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) || Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
-				// GetPosition on the (possibly zoomed) frame image yields surface pixels;
-				// component bounds and the child's hit-testing are design-space.
-				var point = e.GetPosition(framePresenter.Visual);
-				var designPoint = new Point(point.X / viewport.Scale, point.Y / viewport.Scale);
-				// A tab HEADER is not a component of its own - it is painted by the TabControl
-				// itself - so a click on one can never be found by the generic hit-test below (that
-				// only ever resolves to a real component). Checked first, and deliberately BEFORE
-				// the IsAdornerSource bail-out below: when the TabControl itself is the current
-				// selection, moveThumb is drawn across its ENTIRE bounds - including the header
-				// strip, since that strip is part of the control's own bounding rect - so a plain
-				// IsAdornerSource(e.OriginalSource) check would see the click as landing on
-				// moveThumb (cursor shows the "move" SizeAll cursor there) and return before ever
-				// trying a header switch, no matter how many times the header was clicked. Real
-				// VS's TabControlDesigner intercepts a header click before anything else gets a
-				// chance to see it; this must too, even through an adorner drawn on top of it.
-				if (!extendSelection && !previewResizeDrag && !resizingDrag && !marqueeSelecting
-					&& await TrySwitchTabAsync(designPoint)) {
-					// moveThumb (a real WPF Thumb) may already have captured the mouse for its own
-					// drag gesture as this same event bubbled through it, before reaching here -
-					// release it, or the immediately-following near-zero-delta MouseMove/MouseUp
-					// would still start/complete a spurious move-drag of the TabControl right after
-					// switching tabs.
-					if (moveThumb.IsMouseCaptured) moveThumb.ReleaseMouseCapture();
-					e.Handled = true;
-					return;
-				}
-				if (previewResizeDrag || resizingDrag || marqueeSelecting)
-					return;
-				// Who owns this press - an adorner glyph drawn on top, a component underneath it, or
-				// empty canvas - is decided by the shared DesignSurfaceClickArbiter rather than
-				// inline here. Three separate regressions came out of this arbitration when it lived
-				// in this method (tab headers unclickable, then move-drag broken outright, then
-				// move-drag broken for nested controls only); see that type's own remarks, and
-				// DesignSurfaceClickArbiterTests for the cases now pinned down.
-				var decision = DesignSurfaceClickArbiter.Decide(
-					ClickCandidates(), designPoint, SelectedComponentName, IsAdornerSource(e.OriginalSource));
-				if (decision.Action == DesignSurfaceClickAction.LetAdornerHandle)
-					return;
-				if (decision.ReleaseAdornerCapture && moveThumb.IsMouseCaptured)
-					moveThumb.ReleaseMouseCapture();
-				if (decision.Action == DesignSurfaceClickAction.StartMarquee) {
-					marqueeSelecting = true;
-					marqueeExtendsSelection = extendSelection;
-					marqueeStart = designPoint;
-					marqueeBorder.Width = marqueeBorder.Height = 0;
-					var (mx, my) = viewport.DesignToSurface(designPoint.X, designPoint.Y);
-					Canvas.SetLeft(marqueeBorder, mx);
-					Canvas.SetTop(marqueeBorder, my);
-					marqueeBorder.Visibility = Visibility.Visible;
-					CaptureMouse();
-					e.Handled = true;
-					return;
-				}
-				var result = await client.HitTestAsync(version, (int)designPoint.X, (int)designPoint.Y, CancellationToken.None);
-				if (!extendSelection) selectedComponentNames.Clear();
-				if (!String.IsNullOrEmpty(result.ComponentName)) {
-					if (extendSelection && selectedComponentNames.Contains(result.ComponentName)) selectedComponentNames.Remove(result.ComponentName);
-					else selectedComponentNames.Add(result.ComponentName);
-				}
-				SelectedComponentName = selectedComponentNames.Contains(result.ComponentName)
-					? result.ComponentName : selectedComponentNames.FirstOrDefault() ?? "";
-				selectedComponent = state?.Components?.FirstOrDefault(item => item.Name == SelectedComponentName);
-				UpdateDesignGuides();
-				UpdateAdorners();
-				Focus();
-				SelectionChanged?.Invoke(this, EventArgs.Empty);
-				if (e.ClickCount == 2 && !extendSelection && !String.IsNullOrEmpty(SelectedComponentName)) {
-					DefaultEventRequested?.Invoke(this, new RemoteComponentEventArgs(SelectedComponentName));
-					e.Handled = true;
-				}
-			} catch (Exception exception) {
-				// Was a blanket empty catch - any exception here (including a HitTestAsync RPC
-				// fault) used to make a real click on a real control silently no-op instead of
-				// selecting anything, with no diagnostic trail at all.
-				try {
-					System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "OpenDevelop.FormsDesigner.host.log"),
-						$"{DateTimeOffset.Now:O} OnMouseLeftButtonDown failed: {exception}{Environment.NewLine}");
-				} catch { }
-			}
-		}
 
 		/// <summary>If designPoint lands inside one of a TabControl's own reported
 		/// TabHeaderBounds (see DesignerComponentInfo's own doc comment - a header is not a
@@ -1599,108 +1367,39 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			return true;
 		}
 
+
+
+
 		/// <summary>Right-click: select whatever is under the pointer, then ask the host to show a
 		/// context menu for it. Real VS does both from one press, and selecting first is what makes
 		/// the menu's contents well-defined - designer verbs (Add Tab/Remove Tab) are a property of
-		/// the SELECTED component.
-		///
-		/// Deliberately routed through the same server hit-test as a left click rather than a local
-		/// bounds check: only the child process knows which component actually owns a pixel (it
-		/// honours visibility, container nesting and ToolStrip items), and disagreeing with it here
-		/// is what produced the "clicking label1 selects the tab page" class of bug.</summary>
-		async void OnMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+		/// the SELECTED component. Routed through the host's hit test: only the child process knows
+		/// which component owns a pixel. Presses on the tray (its own menus) and on the extension
+		/// layer's editors are not the surface's.</summary>
+		void OnCanvasRightButtonDown(object sender, MouseButtonEventArgs e)
 		{
+			if (state == null || !HasRender || IsWithin(e.OriginalSource, trayRegion) || !IsWithin(e.OriginalSource, canvasScroller)
+				|| IsWithin(e.OriginalSource, renameEditor) || IsWithin(e.OriginalSource, typeHereCell))
+				return;
 			try {
-				if (IsOutsideDesignSurface(e.OriginalSource) || previewResizeDrag || resizingDrag || marqueeSelecting)
-					return;
-				var point = e.GetPosition(framePresenter.Visual);
-				var designPoint = new Point(point.X / viewport.Scale, point.Y / viewport.Scale);
-				var hit = await client.HitTestAsync(version, (int)designPoint.X, (int)designPoint.Y, CancellationToken.None);
-				if (!String.IsNullOrEmpty(hit.ComponentName) && hit.ComponentName != SelectedComponentName) {
-					selectedComponentNames.Clear();
-					selectedComponentNames.Add(hit.ComponentName);
-					SelectedComponentName = hit.ComponentName;
-					selectedComponent = state?.Components?.FirstOrDefault(item => item.Name == hit.ComponentName);
-					UpdateDesignGuides();
-					UpdateAdorners();
-					SelectionChanged?.Invoke(this, EventArgs.Empty);
-				}
+				var designPoint = ToDesignPoint(e.GetPosition(this));
+				var hit = Task.Run(() => client.HitTestAsync(version, (int)designPoint.X, (int)designPoint.Y, CancellationToken.None)).GetAwaiter().GetResult();
+				if (!String.IsNullOrEmpty(hit.ComponentName) && hit.ComponentName != SelectedComponentName)
+					SelectSingleComponent(hit.ComponentName, takeFocus: false);
 				Focus();
 				e.Handled = true;
 				ContextMenuRequested?.Invoke(this, new RemoteComponentEventArgs(hit.ComponentName ?? ""));
 			} catch (Exception exception) {
-				// Same reasoning as OnMouseLeftButtonDown's own catch: a faulted hit-test RPC must
-				// not silently swallow the gesture with no diagnostic trail.
-				try {
-					System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "OpenDevelop.FormsDesigner.host.log"),
-						$"{DateTimeOffset.Now:O} OnMouseRightButtonDown failed: {exception}{Environment.NewLine}");
-				} catch { }
+				// A faulted hit-test RPC must not silently swallow the gesture with no trail.
+				ICSharpCode.Core.LoggingService.Warn("RemoteFormsDesignerControl.OnCanvasRightButtonDown: " + exception.Message);
 			}
-		}
-
-		void OnMouseMove(object sender, MouseEventArgs e)
-		{
-			if (!marqueeSelecting || e.LeftButton != MouseButtonState.Pressed) return;
-			// Marquee state is design-space; convert both corners before drawing so the
-			// rubber band tracks the zoomed design rect exactly.
-			var point = e.GetPosition(framePresenter.Visual);
-			var designPoint = new Point(point.X / viewport.Scale, point.Y / viewport.Scale);
-			var left = Math.Min(marqueeStart.X, designPoint.X);
-			var top = Math.Min(marqueeStart.Y, designPoint.Y);
-			var (sx, sy) = viewport.DesignToSurface(left, top);
-			var (sx2, sy2) = viewport.DesignToSurface(
-				left + Math.Abs(designPoint.X - marqueeStart.X),
-				top + Math.Abs(designPoint.Y - marqueeStart.Y));
-			Canvas.SetLeft(marqueeBorder, sx);
-			Canvas.SetTop(marqueeBorder, sy);
-			marqueeBorder.Width = Math.Max(0, sx2 - sx);
-			marqueeBorder.Height = Math.Max(0, sy2 - sy);
-		}
-
-		void OnMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
-		{
-			if (!marqueeSelecting) return;
-			marqueeSelecting = false;
-			ReleaseMouseCapture();
-			var bounds = new Rect(Canvas.GetLeft(marqueeBorder), Canvas.GetTop(marqueeBorder),
-				marqueeBorder.Width, marqueeBorder.Height);
-			marqueeBorder.Visibility = Visibility.Collapsed;
-			if (!marqueeExtendsSelection) selectedComponentNames.Clear();
-			if (bounds.Width >= 3 || bounds.Height >= 3) {
-				// IsVisible: rubber-banding over a TabControl must not also select the controls
-				// sitting on its OTHER, hidden pages, whose reported bounds overlap the page that
-				// is showing - see DesignerComponentInfo.IsVisible.
-				foreach (var component in state.Components.Where(item => !String.IsNullOrEmpty(item.Parent) && item.IsVisible)) {
-					// The marquee rect is drawn in surface space; convert each component rect
-					// the same way before intersecting.
-					var (cx, cy) = viewport.DesignToSurface(component.SurfaceX, component.SurfaceY);
-					var (cx2, cy2) = viewport.DesignToSurface(
-						component.SurfaceX + component.Width, component.SurfaceY + component.Height);
-					var componentBounds = new Rect(cx, cy, cx2 - cx, cy2 - cy);
-					if (bounds.IntersectsWith(componentBounds)) selectedComponentNames.Add(component.Name);
-				}
-			} else if (!marqueeExtendsSelection) {
-				var root = state.Components.FirstOrDefault(item => String.IsNullOrEmpty(item.Parent));
-				if (root != null) selectedComponentNames.Add(root.Name);
-			}
-			SelectedComponentName = selectedComponentNames.FirstOrDefault() ?? "";
-			selectedComponent = state.Components.FirstOrDefault(item => item.Name == SelectedComponentName);
-			UpdateDesignGuides();
-			UpdateAdorners();
-			Focus();
-			SelectionChanged?.Invoke(this, EventArgs.Empty);
-			// SelectionChanged's own handlers (Properties pad, Outline pad) update their selected
-			// row/object as a result of this click - if either grabs WPF keyboard focus doing so
-			// (a common side effect of programmatically selecting a TreeView/grid row), it steals
-			// focus AWAY from the canvas immediately after the Focus() call above, silently
-			// breaking every canvas keyboard gesture (F2, Delete, Tab, arrows) for the rest of this
-			// click. Re-asserting focus here, after those handlers have already run, wins that race.
-			Focus();
-			e.Handled = true;
 		}
 
 		void OnKeyDown(object sender, KeyEventArgs e)
 		{
+			// Keys typed into an editor on the canvas (rename, Type Here) are the editor's.
+			if (e.OriginalSource is TextBoxBase)
+				return;
 			if (e.Key == Key.Escape && selectedComponent != null && !String.IsNullOrEmpty(selectedComponent.Parent)) {
 				SelectSingleComponent(selectedComponent.Parent);
 				e.Handled = true;
@@ -1880,294 +1579,49 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			};
 		}
 
-		void OnDragStarted(object sender, DragStartedEventArgs e)
-		{
-			if (selectedComponent == null || lockedComponentNames.Contains(selectedComponent.Name)) return;
-			resizingDrag = ReferenceEquals(sender, resizeThumb) || ReferenceEquals(sender, resizeHitTarget);
-			BeginDrag();
-		}
 
-		void BeginDrag()
-		{
-			if (selectedComponent == null)
-				return;
-			dragX = selectedComponent.SurfaceX;
-			dragY = selectedComponent.SurfaceY;
-			dragStartX = dragX;
-			dragStartY = dragY;
-			selectedLocalX = selectedComponent.X;
-			selectedLocalY = selectedComponent.Y;
-			dragWidth = selectedComponent.Width;
-			dragHeight = selectedComponent.Height;
-			SetSnapGuides(Array.Empty<(bool, double)>());
-		}
 
-		bool IsOverResizeHitTarget(Point point)
-		{
-			if (resizeHitTarget.Visibility != Visibility.Visible || !resizeHitTarget.IsEnabled)
-				return false;
-			// Compare in the root canvas's coordinate space rather than relying on Canvas.Left in
-			// the ScrollViewer child.  LibreWPF's composed ScrollViewer can apply its own transform
-			// between the two, whereas TranslatePoint follows the actual rendered visual chain.
-			var centre = resizeThumb.TranslatePoint(
-				new Point(resizeThumb.ActualWidth / 2, resizeThumb.ActualHeight / 2), this);
-			const double hitSlop = 16;
-			return Math.Abs(point.X - centre.X) <= hitSlop && Math.Abs(point.Y - centre.Y) <= hitSlop;
-		}
 
-		void OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-		{
-			if (IsPopupSource(e.OriginalSource))
-				return;
-			if (selectedComponent == null || lockedComponentNames.Contains(selectedComponent.Name))
-				return;
-			var pt = e.GetPosition(this);
-			var hitTest = IsOverResizeHitTarget(pt);
-			var thumbCentre = resizeThumb.TranslatePoint(new Point(resizeThumb.ActualWidth / 2, resizeThumb.ActualHeight / 2), this);
-			if (!hitTest)
-				return;
-			resizingDrag = true;
-			previewResizeDrag = true;
-			previewDragPoint = e.GetPosition(this);
-			BeginDrag();
-			CaptureMouse();
-			e.Handled = true;
-		}
 
-		void OnPreviewMouseMove(object sender, MouseEventArgs e)
-		{
-			if (!previewResizeDrag)
-				return;
-			if (e.LeftButton != MouseButtonState.Pressed)
-			{
-				CompletePreviewResizeDrag(canceled: true);
-				return;
-			}
-			var point = e.GetPosition(this);
-			var scale = Math.Max(0.0001, viewport.Scale);
-			var deltaX = (point.X - previewDragPoint.X) / scale;
-			var deltaY = (point.Y - previewDragPoint.Y) / scale;
-			dragWidth = Math.Max(8, dragWidth + deltaX);
-			dragHeight = Math.Max(8, dragHeight + deltaY);
-			previewDragPoint = point;
-			UpdateCanvasExtent();
-			PositionAdorners();
-			ScrollResizeHandleIntoView();
-			e.Handled = true;
-		}
 
-		void OnPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
-		{
-			if (!previewResizeDrag)
-				return;
-			CompletePreviewResizeDrag(canceled: false);
-			e.Handled = true;
-		}
 
-		void CompletePreviewResizeDrag(bool canceled)
-		{
-			if (!previewResizeDrag)
-				return;
-			previewResizeDrag = false;
-			if (IsMouseCaptured)
-				ReleaseMouseCapture();
-			if (selectedComponent == null || canceled) {
-				return;
-			}
-			var selection = renderedSelection;
-			var selectionWidth = (int)Math.Round(selection.Width);
-			var selectionHeight = (int)Math.Round(selection.Height);
-			BoundsChanged?.Invoke(this, new RemoteBoundsChangedEventArgs(selectedComponent.Name,
-				selectedLocalX + (int)Math.Round(selection.X - selectedComponent.SurfaceX),
-				selectedLocalY + (int)Math.Round(selection.Y - selectedComponent.SurfaceY),
-				selectionWidth, selectionHeight));
-		}
 
-		void OnMoveDragDelta(object sender, DragDeltaEventArgs e)
-		{
-			// DragDelta reports surface pixels; convert to design units (the adorner math and
-			// the child's coordinates are design-space).
-			var scale = viewport.Scale;
-			var proposedX = Math.Max(0, dragX + e.HorizontalChange / scale);
-			var proposedY = Math.Max(0, dragY + e.VerticalChange / scale);
-			// Snap the dragged component's edges/centre to nearby siblings' edges/centres and
-			// show alignment guides while dragging (move only - resizes are not snapped),
-			// matching UnoDesignSurfaceControl's own ApplySnap behavior.
-			var (snapDx, snapDy, guideLines) = SnapGuideCalculator.ApplySnap(
-				(dragStartX, dragStartY, dragWidth, dragHeight),
-				proposedX - dragStartX, proposedY - dragStartY, SiblingBounds());
-			dragX = dragStartX + snapDx;
-			dragY = dragStartY + snapDy;
-			SetSnapGuides(guideLines);
-			PositionAdorners();
-		}
 
-		/// <summary>Every other component's design-space bounds, for <see cref="SnapGuideCalculator"/>
-		/// to snap the dragged component against.</summary>
-		IEnumerable<(double X, double Y, double Width, double Height)> SiblingBounds()
-		{
-			if (state?.Components == null || selectedComponent == null)
-				yield break;
-			foreach (var component in state.Components)
-			{
-				if (component.Name == selectedComponent.Name)
-					continue;
-				yield return (component.SurfaceX, component.SurfaceY, component.Width, component.Height);
-			}
-		}
 
-		/// <summary>Shows snap alignment guides at the given design positions
-		/// ((isVertical, position) pairs); empty clears them.</summary>
-		void SetSnapGuides(IReadOnlyList<(bool IsVertical, double Position)> guidesToShow)
-		{
-			foreach (var guide in snapGuides)
-				snapGuideOverlay.Children.Remove(guide);
-			snapGuides.Clear();
-			if (state?.Render == null || guidesToShow.Count == 0)
-				return;
-			var dpi = Math.Max(1, state.Render.Dpi);
-			var designWidth = state.Render.Width / dpi;
-			var designHeight = state.Render.Height / dpi;
-			var (x0, y0) = viewport.DesignToSurface(0, 0);
-			var (x1, y1) = viewport.DesignToSurface(designWidth, designHeight);
-			foreach (var (isVertical, position) in guidesToShow)
-			{
-				var guide = new Rectangle {
-					Fill = new SolidColorBrush(Color.FromRgb(0xE8, 0x5D, 0x2A)),
-					IsHitTestVisible = false
-				};
-				if (isVertical)
-				{
-					var (px, _) = viewport.DesignToSurface(position, 0);
-					Canvas.SetLeft(guide, px);
-					Canvas.SetTop(guide, y0);
-					guide.Width = 1;
-					guide.Height = Math.Max(1, y1 - y0);
-				}
-				else
-				{
-					var (_, py) = viewport.DesignToSurface(0, position);
-					Canvas.SetLeft(guide, x0);
-					Canvas.SetTop(guide, py);
-					guide.Width = Math.Max(1, x1 - x0);
-					guide.Height = 1;
-				}
-				snapGuides.Add(guide);
-				snapGuideOverlay.Children.Add(guide);
-			}
-		}
 
-		void OnResizeDragDelta(object sender, DragDeltaEventArgs e)
-		{
-			var scale = viewport.Scale;
-			dragWidth = Math.Max(8, dragWidth + e.HorizontalChange / scale);
-			dragHeight = Math.Max(8, dragHeight + e.VerticalChange / scale);
-			UpdateCanvasExtent();
-			PositionAdorners();
-			// PositionAdorners runs while a new frame/selection can still be in WPF's measure
-			// pass, when ScrollViewer.ViewportHeight is zero or stale.  Defer one dispatcher
-			// turn so the actual scrollbar viewport is known before deciding whether to scroll.
-			Dispatcher.BeginInvoke(new Action(() => {
-				// A bottom-right thumb is reached from the bottom-right canvas corner.  When an
-				// axis has a scrollbar, partial "just visible" scrolling still leaves the pointer
-				// competing with that bar; place both viewport axes at their real ends first.
-				scroller.ScrollToRightEnd();
-				scroller.ScrollToBottom();
-				ScrollResizeHandleIntoView();
-			}), System.Windows.Threading.DispatcherPriority.Loaded);
-		}
 
-		/// <summary>Expands the scrollable design surface enough to retain the selected item's
-		/// bottom-right resize handle and the normal empty-canvas margin.  It never shrinks while
-		/// a drag is active, which avoids the scrollbar moving underneath the captured pointer.</summary>
-		void UpdateCanvasExtent()
-		{
-			if (state?.Render == null)
-				return;
-			var dpi = Math.Max(1, state.Render.Dpi);
-			var designWidth = state.Render.Width / dpi;
-			var designHeight = state.Render.Height / dpi;
-			if (selectedComponent != null)
-			{
-				designWidth = Math.Max(designWidth, dragX + dragWidth);
-				designHeight = Math.Max(designHeight, dragY + dragHeight);
-			}
-			var (right, bottom) = viewport.DesignToSurface(designWidth, designHeight);
-			designSurface.Width = Math.Max(scroller.ViewportWidth, right + CanvasMargin);
-			designSurface.Height = Math.Max(scroller.ViewportHeight, bottom + CanvasMargin);
-			scrollContent.Width = designSurface.Width;
-			scrollContent.Height = designSurface.Height;
-		}
 
-		/// <summary>Keeps a live resize's handle inside the visible canvas.  This is deliberately
-		/// performed during the drag, rather than after completion, so a user can continue growing
-		/// a form without driving the pointer beyond the tab's edge.</summary>
-		void ScrollResizeHandleIntoView()
-		{
-			// Do not derive an offset from design coordinates here.  That used to scroll on the
-			// first drag sample (even while the handle was already visible), and the resulting
-			// ScrollViewer transform canceled the captured pointer's next relative movement.
-			// Instead, inspect the actual rendered handle in the viewport and scroll only after
-			// it reaches the visible edge.
-			if (scroller.ViewportWidth <= 0 || scroller.ViewportHeight <= 0)
-				return;
-			var handle = resizeThumb.TranslatePoint(
-				new Point(resizeThumb.ActualWidth / 2, resizeThumb.ActualHeight / 2), scroller);
-			const double edgeMargin = 24;
-			if (handle.X > scroller.ViewportWidth - edgeMargin)
-				scroller.ScrollToHorizontalOffset(scroller.HorizontalOffset + handle.X - (scroller.ViewportWidth - edgeMargin));
-			else if (handle.X < edgeMargin)
-				scroller.ScrollToHorizontalOffset(Math.Max(0, scroller.HorizontalOffset + handle.X - edgeMargin));
-			if (handle.Y > scroller.ViewportHeight - edgeMargin)
-				scroller.ScrollToVerticalOffset(scroller.VerticalOffset + handle.Y - (scroller.ViewportHeight - edgeMargin));
-			else if (handle.Y < edgeMargin)
-				scroller.ScrollToVerticalOffset(Math.Max(0, scroller.VerticalOffset + handle.Y - edgeMargin));
-		}
 
 		/// <summary>Keeps the native ToolStrip template node usable when the strip falls outside
 		/// the canvas viewport.  Use rendered WPF coordinates rather than design coordinates: the
 		/// latter omit zoom, pan, and the ScrollViewer's current transform.</summary>
 		void EnsureToolStripInsertionNodeVisible()
 		{
-			if (!toolStripInsertChevron.IsVisible || scroller.ViewportWidth <= 0 || scroller.ViewportHeight <= 0)
+			if (!toolStripInsertChevron.IsVisible || canvasScroller.ViewportWidth <= 0 || canvasScroller.ViewportHeight <= 0)
 				return;
-			var topLeft = toolStripInsertChevron.TranslatePoint(new Point(0, 0), scroller);
+			var topLeft = toolStripInsertChevron.TranslatePoint(new Point(0, 0), canvasScroller);
 			var bottomRight = toolStripInsertChevron.TranslatePoint(
-				new Point(toolStripInsertChevron.ActualWidth, toolStripInsertChevron.ActualHeight), scroller);
+				new Point(toolStripInsertChevron.ActualWidth, toolStripInsertChevron.ActualHeight), canvasScroller);
 			const double margin = 12;
-			var horizontalOffset = scroller.HorizontalOffset;
-			var verticalOffset = scroller.VerticalOffset;
+			var horizontalOffset = canvasScroller.HorizontalOffset;
+			var verticalOffset = canvasScroller.VerticalOffset;
 			if (topLeft.X < margin)
 				horizontalOffset = Math.Max(0, horizontalOffset + topLeft.X - margin);
-			else if (bottomRight.X > scroller.ViewportWidth - margin)
-				horizontalOffset += bottomRight.X - (scroller.ViewportWidth - margin);
+			else if (bottomRight.X > canvasScroller.ViewportWidth - margin)
+				horizontalOffset += bottomRight.X - (canvasScroller.ViewportWidth - margin);
 			if (topLeft.Y < margin)
 				verticalOffset = Math.Max(0, verticalOffset + topLeft.Y - margin);
-			else if (bottomRight.Y > scroller.ViewportHeight - margin)
-				verticalOffset += bottomRight.Y - (scroller.ViewportHeight - margin);
-			if (horizontalOffset != scroller.HorizontalOffset || verticalOffset != scroller.VerticalOffset) {
-				scroller.ScrollToHorizontalOffset(horizontalOffset);
-				scroller.ScrollToVerticalOffset(verticalOffset);
+			else if (bottomRight.Y > canvasScroller.ViewportHeight - margin)
+				verticalOffset += bottomRight.Y - (canvasScroller.ViewportHeight - margin);
+			if (horizontalOffset != canvasScroller.HorizontalOffset || verticalOffset != canvasScroller.VerticalOffset) {
+				canvasScroller.ScrollToHorizontalOffset(horizontalOffset);
+				canvasScroller.ScrollToVerticalOffset(verticalOffset);
 				// PointToScreen must observe the new viewport transform before an automation
 				// client receives the insertion-node coordinates below.
-				scroller.UpdateLayout();
+				canvasScroller.UpdateLayout();
 			}
 		}
 
-		void OnDragCompleted(object sender, DragCompletedEventArgs e)
-		{
-			SetSnapGuides(Array.Empty<(bool, double)>());
-			if (selectedComponent == null || e.Canceled) return;
-			if (!resizingDrag) {
-				SelectionMoveRequested?.Invoke(this, new RemoteSelectionMoveEventArgs(
-					(int)Math.Round(dragX - selectedComponent.SurfaceX), (int)Math.Round(dragY - selectedComponent.SurfaceY)));
-				return;
-			}
-			BoundsChanged?.Invoke(this, new RemoteBoundsChangedEventArgs(selectedComponent.Name,
-				selectedLocalX + (int)Math.Round(dragX - selectedComponent.SurfaceX),
-				selectedLocalY + (int)Math.Round(dragY - selectedComponent.SurfaceY),
-				(int)Math.Round(dragWidth), (int)Math.Round(dragHeight)));
-		}
 
 		/// <summary>Whether the current selection is an item inside a currently-open popup (a
 		/// MenuStrip submenu/ContextMenuStrip's own items), rather than laid out directly on a
@@ -2226,11 +1680,11 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 				left = linePosition - thickness / 2; top = selectedComponent.SurfaceY;
 				lineWidth = thickness; lineHeight = selectedComponent.Height;
 			}
-			var (surfaceLeft, surfaceTop) = viewport.DesignToSurface(left, top);
+			var (surfaceLeft, surfaceTop) = ToContent(left, top);
 			Canvas.SetLeft(insertionLine, surfaceLeft);
 			Canvas.SetTop(insertionLine, surfaceTop);
-			insertionLine.Width = Math.Max(1, lineWidth * viewport.Scale);
-			insertionLine.Height = Math.Max(1, lineHeight * viewport.Scale);
+			insertionLine.Width = Math.Max(1, lineWidth * ViewportScale);
+			insertionLine.Height = Math.Max(1, lineHeight * ViewportScale);
 			Panel.SetZIndex(insertionLine, 203);
 			insertionLine.Visibility = Visibility.Visible;
 		}
@@ -2283,19 +1737,12 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 				? selectedComponent?.Name ?? "WinForms designer" : selectedComponent.AccessibleName);
 			AutomationProperties.SetHelpText(this, selectedComponent?.AccessibleDescription ?? "");
 			// A component that has a tray entry but NO place on the surface (Timer, ImageList,
-			// ToolTip, ContextMenuStrip, the dialogs) reports no meaningful bounds, so drawing the
-			// selection outline, the move/resize thumbs or the smart-tag glyph for it would put
-			// them at (0,0) over whatever happens to sit in the form's top-left corner. Reflect
-			// the selection in the tray instead and keep the surface clean.
-			//
-			// Being a tray component is NOT enough to suppress the adorners: every
-			// MenuStrip/ToolStrip/StatusStrip gets a tray entry too (DocumentDesigner adds
-			// anything with a ToolStripDesigner) while still being laid out on the surface, and
-			// those must keep their outline, thumbs, smart tag and insert-item chevron. A missing
-			// Parent is what actually distinguishes "tray only" here.
+			// ToolTip, ContextMenuStrip, the dialogs) has no outline (the canvas has no node for it)
+			// and no surface glyphs; the tray shows its selection instead. Being a tray component
+			// is NOT enough: every MenuStrip/ToolStrip/StatusStrip gets a tray entry too while
+			// still being laid out on the surface. A missing Parent is what marks "tray only".
 			if (selectedComponent?.IsTrayComponent == true && String.IsNullOrEmpty(selectedComponent.Parent)) {
-				adornerLayer.ClearSelection();
-				moveThumb.Visibility = reorderThumb.Visibility = popupReorderThumb.Visibility = resizeHitTarget.Visibility = resizeThumb.Visibility =
+				reorderThumb.Visibility = popupReorderThumb.Visibility =
 					smartTagChevron.Visibility = toolStripInsertChevron.Visibility = Visibility.Collapsed;
 				toolStripHost = null;
 				RefreshTrayHighlight();
@@ -2304,28 +1751,16 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			RefreshTrayHighlight();
 			var visible = selectedComponent != null;
 			var isRoot = visible && String.IsNullOrEmpty(selectedComponent.Parent);
-			// The move/resize thumbs exist to drive design/set-bounds, which only ever operates on
-			// a real Control ("host.Container.Components[id] as Control"). A selected
-			// ToolStripItem (a menu item, a toolbar button) is never a Control, so showing these
-			// for one and dragging it used to throw "Control not found" straight out of the child.
-			var canResize = visible && selectedComponent.IsControl;
-			resizeHitTarget.Visibility = resizeThumb.Visibility = canResize ? Visibility.Visible : Visibility.Collapsed;
-			moveThumb.Visibility = canResize && !isRoot ? Visibility.Visible : Visibility.Collapsed;
 			// A selected ToolStripItem with a Parent (i.e. not tray-only) can be dragged to reorder
 			// among its siblings - design/reorder-toolstrip-item, index-based rather than
-			// pixel-based, so it needs no "Control not found" guard the move/resize thumbs do.
-			// Which of the two thumbs applies depends on whether the item is stacked vertically
-			// inside an open popup or laid out horizontally on a root strip.
+			// pixel-based. Which of the two thumbs applies depends on whether the item is stacked
+			// vertically inside an open popup or laid out horizontally on a root strip.
 			var reorderable = visible && !selectedComponent.IsControl && !isRoot;
 			var inPopup = reorderable && SelectionIsInsideOpenPopup();
 			reorderThumb.Visibility = reorderable && !inPopup ? Visibility.Visible : Visibility.Collapsed;
 			popupReorderThumb.Visibility = inPopup ? Visibility.Visible : Visibility.Collapsed;
-			// The smart tag applies to (almost) any selected component - VS shows it even when
-			// a given component's own action-list turns out empty, so showing it eagerly here
-			// and only discovering "no actions" once the popup's own list-smart-tag-actions RPC
-			// comes back empty matches VS's own behavior closer than hiding it up front would
-			// (which would need a synchronous, per-selection RPC round-trip this control's
-			// SelectionChanged path does not otherwise make).
+			// The smart tag applies to (almost) any selected component - VS shows it even when a
+			// component's own action list turns out empty.
 			smartTagChevron.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
 			// VS keeps the "insert new item" glyph visible next to the strip's last item even
 			// while a child ToolStripItem (not the strip itself) is selected - resolve the owning
@@ -2339,64 +1774,38 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			toolStripInsertChevron.Visibility = toolStripHost?.ItemInsertionBounds != null
 				&& toolStripHost.ItemInsertionStyle == DesignerItemInsertionStyles.SplitButton
 				? Visibility.Visible : Visibility.Collapsed;
-			// The MenuStrip/ContextMenuStrip/dropdown-item flavour of the same affordance (see
-			// ItemInsertionStyle's own doc comment) - this branch was previously missing entirely,
-			// so typeHereCell was built, wired and positioned (see PositionAdorners below) but
-			// never actually shown: selecting a MenuStrip left its top-level "Type Here" cell
-			// permanently collapsed, silently doing nothing on click.
+			// The MenuStrip/ContextMenuStrip/dropdown-item flavour of the same affordance.
 			typeHereCell.Visibility = toolStripHost != null
 				&& toolStripHost.ItemInsertionStyle == DesignerItemInsertionStyles.TypeHere
 				? Visibility.Visible : Visibility.Collapsed;
 			if (typeHereEditing)
 				CommitTypeHere(TypeHereCommit.Cancel);
-			if (!visible) {
-				adornerLayer.ClearSelection();
+			var locked = visible && lockedComponentNames.Contains(selectedComponent.Name);
+			reorderThumb.IsEnabled = popupReorderThumb.IsEnabled = !locked;
+			SelectionStroke = locked ? Brushes.DarkOrange : null;
+			if (!visible)
 				return;
-			}
-			var locked = lockedComponentNames.Contains(selectedComponent.Name);
-			moveThumb.IsEnabled = reorderThumb.IsEnabled = popupReorderThumb.IsEnabled = !locked;
-			resizeHitTarget.IsEnabled = resizeThumb.IsEnabled = isRoot || !locked;
-			adornerLayer.SelectionStroke = locked ? Brushes.DarkOrange : SelectionBrush;
-			dragX = selectedComponent.SurfaceX;
-			dragY = selectedComponent.SurfaceY;
-			selectedLocalX = selectedComponent.X;
-			selectedLocalY = selectedComponent.Y;
-			dragWidth = selectedComponent.Width;
-			dragHeight = selectedComponent.Height;
 			PositionAdorners();
-			// Unlike resize handles, this is an explicit insertion affordance.  Selecting its
+			// Unlike resize handles, this is an explicit insertion affordance. Selecting its
 			// owning strip must make it reachable, including a StatusStrip below a short canvas.
 			EnsureToolStripInsertionNodeVisible();
-			// Deliberately does NOT call ScrollResizeHandleIntoView() here: that used to force
-			// the canvas to jump/scroll to the selected component's resize handle on every plain
-			// selection (most jarring for the root Form, whose handle sits at its bottom-right
-			// corner - selecting it could scroll far away from wherever the user was looking).
-			// The handle-visibility problem this originally guarded against (a resize can't start
-			// if the handle is hidden behind a scrollbar) only actually matters once a resize
-			// drag is already in progress, where the OTHER two call sites (OnPreviewMouseMove/
-			// OnResizeDragDelta) still keep the handle in view without touching plain selection.
 		}
 
+		/// <summary>Places the extension-layer glyphs over the selection, in content coordinates
+		/// (the canvas re-runs this on every zoom, fit or new frame through ViewportChanged).</summary>
 		void PositionAdorners()
 		{
-			renderedSelection = new Rect(dragX, dragY, dragWidth, dragHeight);
-			adornerLayer.ShowSelection(renderedSelection, viewport);
-			// Convert both design corners to surface coordinates so the move/resize handles
-			// track the (possibly zoomed) design rect exactly.
-			var (left, top) = viewport.DesignToSurface(dragX, dragY);
-			var (right, bottom) = viewport.DesignToSurface(dragX + dragWidth, dragY + dragHeight);
-			Canvas.SetLeft(moveThumb, left);
-			Canvas.SetTop(moveThumb, top);
-			moveThumb.Width = Math.Max(1, right - left);
-			moveThumb.Height = Math.Max(1, bottom - top);
+			if (selectedComponent == null)
+				return;
+			var (left, top) = ToContent(selectedComponent.SurfaceX, selectedComponent.SurfaceY);
+			var (right, bottom) = ToContent(selectedComponent.SurfaceX + selectedComponent.Width,
+				selectedComponent.SurfaceY + selectedComponent.Height);
 			Canvas.SetLeft(reorderThumb, left);
 			Canvas.SetTop(reorderThumb, top);
 			reorderThumb.Width = Math.Max(1, right - left);
 			reorderThumb.Height = Math.Max(1, bottom - top);
-			// Same rect as reorderThumb (a popup item's own SurfaceX/Y/Width/Height are already in
-			// the same absolute basis - see OnPopupReorderDragCompleted's own note), but a higher
-			// z-index: it must sit above the popup's own Image overlay (200) and its Type Here
-			// editor (201) to remain draggable once a popup is open.
+			// Same rect as reorderThumb, but above the popup's own Image overlay (200) and its
+			// Type Here editor (201) so it stays draggable once a popup is open.
 			Canvas.SetLeft(popupReorderThumb, left);
 			Canvas.SetTop(popupReorderThumb, top);
 			popupReorderThumb.Width = Math.Max(1, right - left);
@@ -2407,50 +1816,32 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			renameEditor.Width = Math.Max(1, right - left);
 			renameEditor.Height = Math.Max(1, bottom - top);
 			Panel.SetZIndex(renameEditor, 302);
-			Canvas.SetLeft(resizeThumb, right - resizeThumb.Width / 2);
-			Canvas.SetTop(resizeThumb, bottom - resizeThumb.Height / 2);
-			Canvas.SetLeft(resizeHitTarget, right - resizeHitTarget.Width / 2);
-			Canvas.SetTop(resizeHitTarget, bottom - resizeHitTarget.Height / 2);
-			Panel.SetZIndex(resizeHitTarget, 99);
-			Panel.SetZIndex(resizeThumb, 100);
 			// Smart tag: anchored at the selection's top-right corner, offset half outside the
 			// bounds - the same corner/offset VS's own smart-tag glyph uses.
 			Canvas.SetLeft(smartTagChevron, right - smartTagChevron.Width / 2);
 			Canvas.SetTop(smartTagChevron, top - smartTagChevron.Height / 2);
 			Panel.SetZIndex(smartTagChevron, 101);
-			// ToolStrip insert chevron: past the RIGHTMOST EXISTING ITEM, not the strip's own
-			// right edge - a Dock=Top strip is normally as wide as its parent, so anchoring to
-			// the control's own bounds would place the glyph off past the form's edge, outside
-			// the visible/rendered area, for any strip that isn't already full of items. Uses the
-			// HOST strip's own bounds/items - not the current selection's - since selecting a
-			// child ToolStripItem (e.g. a StatusStrip's ProgressBar) still shows this glyph
-			// anchored to its owning strip, matching real VS behavior.
-			// Unlike smartTagChevron/resizeThumb (fixed-size adorner HANDLES, deliberately
-			// screen-constant regardless of zoom - matching real drag-handle conventions), this
-			// glyph is meant to read as a real ToolStripItem drawn ON the strip's own bitmap, so
-			// it must scale with the strip the way real VS's actual sited ToolStripSplitButton
-			// item naturally does when its DesignSurface bitmap is zoomed. A RenderTransform
-			// leaves the logical Width/Height (used below for centering) unchanged, so the
-			// effective on-screen size is computed separately as scaledWidth/scaledHeight.
-			var scale = Math.Max(0.1, viewport.Scale);
+			// ToolStrip insert chevron: past the RIGHTMOST EXISTING ITEM of the owning strip (a
+			// Dock=Top strip is as wide as its parent, so its own right edge would put the glyph past
+			// the form). It is drawn ON the strip, so it scales with the zoom like a real item.
+			var scale = Math.Max(0.1, ViewportScale);
 			toolStripInsertChevron.RenderTransformOrigin = new Point(0, 0);
 			toolStripInsertChevron.RenderTransform = new ScaleTransform(scale, scale);
 			var scaledHeight = toolStripInsertChevron.Height * scale;
 			var insertLeft = right;
 			var insertTop = top + (bottom - top - scaledHeight) / 2;
 			if (toolStripHost != null) {
-				var (hostLeft, hostTop) = viewport.DesignToSurface(toolStripHost.SurfaceX, toolStripHost.SurfaceY);
-				var (_, hostBottom) = viewport.DesignToSurface(toolStripHost.SurfaceX, toolStripHost.SurfaceY + toolStripHost.Height);
+				var (hostLeft, hostTop) = ToContent(toolStripHost.SurfaceX, toolStripHost.SurfaceY);
+				var (_, hostBottom) = ToContent(toolStripHost.SurfaceX, toolStripHost.SurfaceY + toolStripHost.Height);
 				var lastItem = state?.Components?.Where(item => item.Parent == toolStripHost.Name)
 					.OrderByDescending(item => item.SurfaceX + item.Width).FirstOrDefault();
 				if (lastItem != null) {
-					var (itemRight, itemTop) = viewport.DesignToSurface(lastItem.SurfaceX + lastItem.Width, lastItem.SurfaceY);
-					var (_, itemBottom) = viewport.DesignToSurface(lastItem.SurfaceX, lastItem.SurfaceY + lastItem.Height);
+					var (itemRight, itemTop) = ToContent(lastItem.SurfaceX + lastItem.Width, lastItem.SurfaceY);
+					var (_, itemBottom) = ToContent(lastItem.SurfaceX, lastItem.SurfaceY + lastItem.Height);
 					insertLeft = itemRight;
 					insertTop = itemTop + (itemBottom - itemTop - scaledHeight) / 2;
 				} else {
-					// No real items yet: sit just past the strip's own left edge instead of its
-					// (typically much wider) right edge.
+					// No real items yet: sit just past the strip's own left edge.
 					insertLeft = hostLeft + 4;
 					insertTop = hostTop + (hostBottom - hostTop - scaledHeight) / 2;
 				}
@@ -2459,7 +1850,7 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			Canvas.SetTop(toolStripInsertChevron, insertTop);
 			Panel.SetZIndex(toolStripInsertChevron, 101);
 			if (toolStripHost?.ItemInsertionBounds is { } insertionBounds) {
-				var (nodeLeft, nodeTop) = viewport.DesignToSurface(
+				var (nodeLeft, nodeTop) = ToContent(
 					toolStripHost.SurfaceX + insertionBounds.X, toolStripHost.SurfaceY + insertionBounds.Y);
 				Canvas.SetLeft(toolStripInsertChevron, nodeLeft);
 				Canvas.SetTop(toolStripInsertChevron, nodeTop);
@@ -2467,26 +1858,23 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 				toolStripInsertChevron.Height = Math.Max(1, insertionBounds.Height);
 			}
 			// The "Type Here" cell occupies the same slot (the template node is the strip's last
-			// item either way), just sized like a menu cell rather than a square button.
+			// item either way), just sized like a menu cell rather than a square button - snapped to
+			// the host's own rendered template-node bounds when it reports them.
 			Canvas.SetLeft(typeHereCell, insertLeft + 2);
 			Canvas.SetTop(typeHereCell, insertTop);
 			typeHereCell.MinHeight = toolStripInsertChevron.Height;
 			Panel.SetZIndex(typeHereCell, 101);
-			// Snap to the backend's own rendered template-node bounds when it reports them, exactly
-			// like toolStripInsertChevron above - without this, typeHereCell only ever used the
-			// "last item" heuristic above, which is narrower than and does not align with the real
-			// native cell painted into the bitmap underneath it (a real reported bug: the two boxes
-			// visibly did not overlap).
 			if (toolStripHost?.ItemInsertionBounds is { } typeHereBounds) {
-				var (cellLeft, cellTop) = viewport.DesignToSurface(
+				var (cellLeft, cellTop) = ToContent(
 					toolStripHost.SurfaceX + typeHereBounds.X, toolStripHost.SurfaceY + typeHereBounds.Y);
 				Canvas.SetLeft(typeHereCell, cellLeft);
 				Canvas.SetTop(typeHereCell, cellTop);
-				typeHereCell.Width = Math.Max(1, typeHereBounds.Width);
-				typeHereCell.Height = Math.Max(1, typeHereBounds.Height);
+				typeHereCell.Width = Math.Max(1, typeHereBounds.Width * ViewportScale);
+				typeHereCell.Height = Math.Max(1, typeHereBounds.Height * ViewportScale);
 				typeHereCell.MinHeight = 0;
 			}
 		}
+
 
 		/// <summary>Whether <paramref name="type"/> is a ToolStrip/StatusStrip/MenuStrip itself
 		/// (not one of its items) - the "insert new item" chevron is only drawn on the strip, not
@@ -2505,22 +1893,25 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 
 		async void OnDrop(object sender, System.Windows.DragEventArgs e)
 		{
-			if (e.Data.GetData(typeof(ToolboxItem)) is not ToolboxItem item || String.IsNullOrEmpty(item.TypeName))
+			if (e.Data.GetData(typeof(ToolboxItem)) is not ToolboxItem item || String.IsNullOrEmpty(item.TypeName) || state == null)
 				return;
-			// GetPosition on the (possibly zoomed) frame image yields surface pixels; the
-			// child's hit-testing and the drop position are design-space.
-			var point = e.GetPosition(framePresenter.Visual);
-			var designX = point.X / viewport.Scale;
-			var designY = point.Y / viewport.Scale;
-			var hit = await client.HitTestAsync(version, (int)designX, (int)designY, CancellationToken.None);
-			var target = state.Components.FirstOrDefault(component => component.Name == hit.ComponentName);
-			if (target != null && !IsContainer(target.Type))
-				target = state.Components.FirstOrDefault(component => component.Name == target.Parent);
-			target ??= state.Components.FirstOrDefault(component => String.IsNullOrEmpty(component.Parent));
-			if (target != null)
-				ToolboxDrop?.Invoke(this, new RemoteToolboxDropEventArgs(item.TypeName, target.Name,
-					(int)designX - target.SurfaceX, (int)designY - target.SurfaceY));
 			e.Handled = true;
+			try {
+				// The child's hit-testing and the drop position are design-space.
+				var design = ToDesignPoint(e.GetPosition(this));
+				var designX = (double)design.X;
+				var designY = (double)design.Y;
+				var hit = await client.HitTestAsync(version, (int)designX, (int)designY, CancellationToken.None);
+				var target = state.Components.FirstOrDefault(component => component.Name == hit.ComponentName);
+				if (target != null && !IsContainer(target.Type))
+					target = state.Components.FirstOrDefault(component => component.Name == target.Parent);
+				target ??= state.Components.FirstOrDefault(component => String.IsNullOrEmpty(component.Parent) && component.IsControl && !component.IsTrayComponent);
+				if (target != null)
+					ToolboxDrop?.Invoke(this, new RemoteToolboxDropEventArgs(item.TypeName, target.Name,
+						(int)designX - target.SurfaceX, (int)designY - target.SurfaceY));
+			} catch (Exception exception) {
+				ICSharpCode.Core.LoggingService.Warn("RemoteFormsDesignerControl.OnDrop: " + exception.Message);
+			}
 		}
 
 		static bool IsContainer(string type) => type == "System.Windows.Forms.Form"
@@ -2707,13 +2098,13 @@ namespace ICSharpCode.FormsDesigner.OutOfProcess
 			return true;
 		}
 
-		public void Reposition(DesignViewport viewport, int popupX, int popupY)
+		/// <summary>Places the cell at a content point, sized by the current zoom.</summary>
+		public void Reposition(double left, double top, double scale)
 		{
-			var (left, top) = viewport.DesignToSurface(popupX + Bounds.X, popupY + Bounds.Y);
 			Canvas.SetLeft(Cell, left);
 			Canvas.SetTop(Cell, top);
-			Cell.Width = Math.Max(1, Bounds.Width * viewport.Scale);
-			Cell.Height = Math.Max(1, Bounds.Height * viewport.Scale);
+			Cell.Width = Math.Max(1, Bounds.Width * scale);
+			Cell.Height = Math.Max(1, Bounds.Height * scale);
 		}
 
 		void Begin()

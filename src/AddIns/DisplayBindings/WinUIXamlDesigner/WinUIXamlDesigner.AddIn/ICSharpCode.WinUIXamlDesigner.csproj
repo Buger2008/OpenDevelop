@@ -11,10 +11,17 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\DesignerCanvas\ICSharpCode.DesignerCanvas.csproj" Private="false" />
     <ProjectReference Include="..\..\..\..\Main\Base\Project\ICSharpCode.SharpDevelop.csproj" Private="false" />
     <ProjectReference Include="..\..\..\..\Main\Core\Project\ICSharpCode.Core.csproj" Private="false" />
     <ProjectReference Include="..\..\..\..\Main\Designer\Designer.Presentation\Designer.Presentation.csproj" Private="false" />
     <ProjectReference Include="..\..\..\..\Main\Designer\Designer.Remote\Designer.Remote.csproj" Private="false" />
+    <!-- This addin's XAML language servers (registered by RegisterXamlLanguageServersCommand):
+         built, and deployed by their own DeployToAddIns, whenever the addin is. Not referenced -
+         they are separate processes. -->
+    <ProjectReference Include="..\WinUIXamlDesigner.LanguageServer.WinUI\WinUIXamlDesigner.LanguageServer.WinUI.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" Private="false" />
+    <ProjectReference Include="..\WinUIXamlDesigner.LanguageServer.Uno\WinUIXamlDesigner.LanguageServer.Uno.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" Private="false" />
+    <ProjectReference Include="..\WinUIXamlDesigner.LanguageServer.ProGpu\WinUIXamlDesigner.LanguageServer.ProGpu.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" Private="false" />
 	<ProjectReference Include="..\..\..\..\Main\Designer\Designer.Shell\Designer.Shell.csproj" Private="false" />
     <!-- IPropertyGridEventSource / the shared Properties pad's Xceed grid (IPropertyGridEventSource). -->
     <ProjectReference Include="..\..\..\..\..\externals\wpftoolkit\ExtendedWPFToolkitSolution\Src\Xceed.Wpf.Toolkit\Xceed.Wpf.Toolkit.csproj" Private="false" />
@@ -22,4 +29,10 @@
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
   </ItemGroup>
   <ItemGroup><None Include="WinUIXamlDesigner.addin" /></ItemGroup>
+  <!-- ICSharpCode.Designer.Presentation.dll comes from the ICSharpCode.DesignerCanvas addin (see
+       WinUIXamlDesigner.addin). Private="false" stops only the direct reference; a transitive one
+       still copies it here, and a second copy gives the canvas's types two identities. -->
+  <Target Name="DropPrivateDesignerPresentationCopy" AfterTargets="Build">
+    <Delete Files="$(OutDir)ICSharpCode.Designer.Presentation.dll;$(OutDir)ICSharpCode.Designer.Presentation.pdb" />
+  </Target>
 </Project>

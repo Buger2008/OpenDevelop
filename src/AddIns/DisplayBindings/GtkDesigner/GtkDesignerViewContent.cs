@@ -16,10 +16,11 @@ using ICSharpCode.SharpDevelop.Gui;
 using ICSharpCode.SharpDevelop.WinForms;
 using ICSharpCode.SharpDevelop.Workbench;
 using ICSharpCode.SharpDevelop.Widgets;
+using ICSharpCode.SharpDevelop.Designer.Surface;
 
 namespace ICSharpCode.GtkDesigner;
 
-public sealed class GtkDesignerViewContent : AbstractViewContentHandlingLoadErrors, IOutlineContentHost, IToolsHost, IHasPropertyContainer, IUndoHandler, IFilterableToolbox
+public sealed class GtkDesignerViewContent : AbstractViewContentHandlingLoadErrors, IOutlineContentHost, IToolsHost, IHasPropertyContainer, IUndoHandler, IFilterableToolbox, IDesignCanvasBackend
 {
 	public static readonly string[] ToolNames = { "GtkBox", "GtkGrid", "GtkCenterBox", "GtkPaned", "GtkScrolledWindow", "GtkLabel", "GtkButton", "GtkEntry", "GtkPasswordEntry", "GtkCheckButton", "GtkSwitch", "GtkSpinButton", "GtkDropDown", "GtkListBox", "GtkListView", "GtkGridView", "GtkImage", "GtkPicture", "GtkProgressBar", "GtkSeparator" };
 	readonly DocumentOutlineControl outline = new(); readonly ListBox toolbox = new() { DisplayMemberPath = nameof(DesignerToolboxItemInfo.DisplayName) }; readonly PropertyContainer properties = new();
@@ -27,15 +28,16 @@ public sealed class GtkDesignerViewContent : AbstractViewContentHandlingLoadErro
 	readonly DesignerSelectionController selection;
 	readonly DesignerPadController pads;
 	readonly DesignerCommandController commands = new();
-	readonly Border surface = new() { Padding = new Thickness(24), Background = Brushes.DimGray };
 	readonly TextBlock diagnostic = new() { Foreground = Brushes.OrangeRed, Margin = new Thickness(8), TextWrapping = TextWrapping.Wrap };
-	readonly DesignerCanvas canvas = new();
-	readonly Dictionary<string, FrameworkElement> nativeTargetsById = new();
+	// The shared design canvas (ICSharpCode.DesignerCanvas addin), keyed by GtkBuilder object id.
+	// GTK lays every widget out itself, so the canvas shows no resize handles and a drag is a
+	// reorder among siblings (see CommitCanvasDrag).
+	readonly DesignSurface canvas = new();
+	readonly DesignSurfaceController canvasController;
+	Dictionary<string, string> pathById = new(StringComparer.Ordinal);
 	bool draggingFromToolbox; bool syncingToolbox; string? pressedToolboxType;
-	readonly ScrollViewer scroller = new() { HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
 	GtkDesignerHostClient? host; DesignerSessionState state = new(); DesignerElementNode? selected; string loadedText = "";
 	CancellationTokenSource? renderCancellation; long requestedRenderRevision; long renderedRevision;
-	double zoom = 1; bool gridlines;
 
 	public GtkDesignerViewContent(OpenedFile file) : base(file)
 	{
@@ -49,7 +51,8 @@ public sealed class GtkDesignerViewContent : AbstractViewContentHandlingLoadErro
 		commands.RegisterStandard(() => host?.IsAlive == true && state.CanUndo, () => { Mutate(() => host!.UndoAsync(state.Version).GetAwaiter().GetResult()); return true; },
 			() => host?.IsAlive == true && state.CanRedo, () => { Mutate(() => host!.RedoAsync(state.Version).GetAwaiter().GetResult()); return true; },
 			() => selection.SelectedIds.Count > 0 && host?.IsAlive == true, DeleteSelectedCore);
-		pads = new DesignerPadController(selection, outline.SetRoots, value => properties.SelectedObject = value, outline.SelectNodeById, node => selected = node);
+		pads = new DesignerPadController(selection, outline.SetRoots, value => properties.SelectedObject = value, outline.SelectNodeById, node => { selected = node; canvasController?.RestoreSelection(selection.SelectedIds); });
+		canvasController = new DesignSurfaceController(canvas, this, DesignSurfaceKeying.Id);
 		TabPageText = "Design"; ConfigureCanvas(); var grid = new Grid(); grid.RowDefinitions.Add(new RowDefinition()); grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 		grid.Children.Add(canvas); Grid.SetRow(diagnostic, 1); grid.Children.Add(diagnostic); UserContent = grid;
 		outline.SelectionCommitted += (_, _) => pads.CommitOutlineSelection(outline.SelectedNode?.Id);
@@ -84,7 +87,16 @@ public sealed class GtkDesignerViewContent : AbstractViewContentHandlingLoadErro
 	int IFilterableToolbox.VisibleItemCount => ToolboxItemCount;
 	string IFilterableToolbox.FilterText => ToolboxFilterText;
 	public string ToolboxFilterText => toolboxModel.FilterText;
-	public FrameworkElement? FindNativeTarget(string id) => nativeTargetsById.GetValueOrDefault(id);
+	/// <summary>A rendered object's bounds in screen coordinates, through the canvas's viewport
+	/// (null when it has none, or nothing is rendered).</summary>
+	public Rect? ScreenBoundsOf(string id)
+	{
+		var node = state.Tree == null ? null : Flatten(state.Tree).FirstOrDefault(n => n.Id == id);
+		if (node == null || node.Width <= 0 || node.Height <= 0 || !canvas.HasRender) return null;
+		var topLeft = canvas.SurfacePointToScreen(node.X, node.Y);
+		var bottomRight = canvas.SurfacePointToScreen(node.X + node.Width, node.Y + node.Height);
+		return new Rect(topLeft, bottomRight);
+	}
 	string? ToolboxTypeAt(Point point)
 	{
 		for (var hit = toolbox.InputHitTest(point) as DependencyObject; hit != null; hit = VisualTreeHelper.GetParent(hit))
@@ -96,8 +108,8 @@ public sealed class GtkDesignerViewContent : AbstractViewContentHandlingLoadErro
 	public int ElementCount => state.Tree == null ? 0 : Flatten(state.Tree).Count(n => n.Id != "$interface"); public string SelectedId => selected?.Id ?? ""; public int HostProcessId => host?.ProcessId ?? 0;
 	public string[] ElementIds => state.Tree == null ? Array.Empty<string>() : Flatten(state.Tree).Where(n => n.Id != "$interface").Select(n => n.Id).ToArray();
 	public string RootId => state.Tree?.Id == "$interface" ? state.Tree.Children.FirstOrDefault()?.Id ?? "" : state.Tree?.Id ?? "";
-	public int ToolbarItemCount => canvas.VisibleToolbarItems.Count; public IReadOnlyList<string> ToolbarItems => canvas.VisibleToolbarItems; public string ToolbarCapabilities => canvas.Capabilities.ToString(); public double Zoom { get => zoom; set { zoom = Math.Clamp(value, .25, 2); surface.LayoutTransform = new ScaleTransform(zoom, zoom); } }
-	public bool Gridlines => gridlines; public bool FitMeasured { get; private set; } public void FitDesign() => FitView(); public void ShowGridlines(bool show) { canvas.IsGridEnabled = show; SetGridlines(show); }
+	public int ToolbarItemCount => canvas.VisibleToolbarItems.Count; public IReadOnlyList<string> ToolbarItems => canvas.VisibleToolbarItems; public string ToolbarCapabilities => canvas.Capabilities.ToString(); public double Zoom { get => canvas.ViewportScale; set => canvas.SetViewport(Math.Clamp(value, .25, 2), 0, 0); }
+	public bool Gridlines => canvas.Gridlines; public bool FitMeasured { get; private set; } public void FitDesign() => FitView(); public void ShowGridlines(bool show) { canvas.IsGridEnabled = show; canvas.SetGridlines(show); }
 	public bool HasNativeFrame => !string.IsNullOrEmpty(state.Render?.PngBase64); public int NativeFrameWidth => state.Render?.Width ?? 0; public int NativeFrameHeight => state.Render?.Height ?? 0; public int NativeBoundsCount => state.Tree == null ? 0 : Flatten(state.Tree).Count(n => n.Width > 0 && n.Height > 0);
 	public string NativeFrameFingerprint => HasNativeFrame ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Convert.FromBase64String(state.Render!.PngBase64))) : "";
 	public string[] Diagnostics => state.Diagnostics.Select(d => d.Message).ToArray();
@@ -142,39 +154,86 @@ public sealed class GtkDesignerViewContent : AbstractViewContentHandlingLoadErro
 			await Application.Current.Dispatcher.InvokeAsync(() => { if (token.IsCancellationRequested || host != renderingHost || state.Version != version || rendered.Render?.Sequence != version) return; state = rendered; renderedRevision = version; Rebuild(); });
 		} catch (OperationCanceledException) { } catch (Exception ex) { await Application.Current.Dispatcher.InvokeAsync(() => diagnostic.Text = "GTK render failed: " + ex.Message); }
 	}
-	void Rebuild() { diagnostic.Text = Status; nativeTargetsById.Clear(); pads.UpdateRoots(state.Tree == null ? null : state.Tree.Id == "$interface" ? state.Tree.Children : new[] { state.Tree }); var previewRoot = state.Tree?.Id == "$interface" ? state.Tree.Children.FirstOrDefault() : state.Tree; surface.Child = previewRoot == null ? new TextBlock { Text = "No GTK 4 object tree found.", Foreground = Brushes.White } : NativePreview(previewRoot); }
-	FrameworkElement NativePreview(DesignerElementNode root)
+	void Rebuild()
 	{
-		if (!HasNativeFrame) return Preview(root);
-		var bytes = Convert.FromBase64String(state.Render!.PngBase64); var bitmap = new BitmapImage();
-		using (var stream = new MemoryStream(bytes)) { bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad; bitmap.StreamSource = stream; bitmap.EndInit(); bitmap.Freeze(); }
-		var image = new Image { Source = bitmap, Stretch = Stretch.None };
-		var hits = new Canvas { Background = Brushes.Transparent, AllowDrop = true };
-		DesignerElementNode? dragged = null; Point dragStart = default;
-		var insertion = new Border { Height = 3, Background = Brushes.DodgerBlue, Visibility = Visibility.Collapsed, IsHitTestVisible = false };
-		foreach (var node in Flatten(root).Where(n => n.Width > 0 && n.Height > 0).OrderByDescending(n => n.Width * n.Height)) {
-			var target = new Border { Width = node.Width, Height = node.Height, Background = Brushes.Transparent, Tag = node };
-			Canvas.SetLeft(target, node.X); Canvas.SetTop(target, node.Y);
-			nativeTargetsById[node.Id] = target;
-			target.PreviewMouseLeftButtonDown += (_, e) => { dragged = node; dragStart = e.GetPosition(hits); Select(node); target.CaptureMouse(); e.Handled = true; };
-			target.PreviewMouseMove += (_, e) => { if (dragged == null || e.LeftButton != MouseButtonState.Pressed || (e.GetPosition(hits) - dragStart).Length < 4) return; var over = NativeNodeAt(root, e.GetPosition(hits)); if (over == null || ReferenceEquals(over, dragged)) return; insertion.Width = over.Width; Canvas.SetLeft(insertion, over.X); Canvas.SetTop(insertion, over.Y); insertion.Visibility = Visibility.Visible; };
-			target.PreviewMouseLeftButtonUp += (_, e) => { target.ReleaseMouseCapture(); insertion.Visibility = Visibility.Collapsed; var source = dragged; dragged = null; var over = NativeNodeAt(root, e.GetPosition(hits)); if (source != null && over != null && !ReferenceEquals(source, over)) ReorderBetween(root, source, over); e.Handled = true; };
-			hits.Children.Add(target);
-		}
-		hits.Children.Add(insertion);
-		hits.DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent(DataFormats.StringFormat) ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; };
-		hits.Drop += (_, e) => { if (e.Data.GetData(DataFormats.StringFormat) is not string type || !ToolNames.Contains(type, StringComparer.Ordinal)) return; var over = NativeNodeAt(root, e.GetPosition(hits)); if (over != null) Select(over); Add(type); e.Handled = true; };
-		var result = new Grid { Width = state.Render.Width, Height = state.Render.Height, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top }; result.Children.Add(image); result.Children.Add(hits); return result;
+		diagnostic.Text = HasNativeFrame ? Status : Status + " - no native frame: the GTK 4 runtime could not render this interface.";
+		pads.UpdateRoots(state.Tree == null ? null : state.Tree.Id == "$interface" ? state.Tree.Children : new[] { state.Tree });
+		canvasController.ApplySnapshot(CanvasSnapshot());
+		canvasController.RestoreSelection(selection.SelectedIds);
 	}
-	FrameworkElement Preview(DesignerElementNode? node) { if (node == null) return new TextBlock { Text = "Empty GTK interface" }; FrameworkElement result; if (IsContainer(node)) { var panel = new StackPanel { Background = Brushes.White, MinWidth = 480, MinHeight = 48, Orientation = Value(node, "orientation", "vertical") == "horizontal" ? Orientation.Horizontal : Orientation.Vertical }; foreach (var child in node.Children) panel.Children.Add(Preview(child)); result = panel; } else if (node.Type == "GtkButton") result = new Button { Content = Value(node, "label", node.Id) }; else if (node.Type is "GtkEntry" or "GtkPasswordEntry") result = new TextBox { Text = Value(node, "text", ""), MinWidth = 160 }; else if (node.Type == "GtkCheckButton") result = new CheckBox { Content = Value(node, "label", node.Id) }; else if (node.Type == "GtkProgressBar") result = new ProgressBar { Value = 45, Width = 180, Height = 18 }; else result = new TextBlock { Text = Value(node, "label", node.Id) }; result.Margin = new Thickness(5); result.PreviewMouseLeftButtonDown += (_, e) => { Select(node, Keyboard.Modifiers.HasFlag(ModifierKeys.Control)); e.Handled = true; }; return result; }
+
+	/// <summary>The session as the canvas shows it: the native frame, and the rendered root object
+	/// (not the "$interface" wrapper) with a tree path on every node, which the canvas's hit test
+	/// answers with.</summary>
+	DesignerSessionState CanvasSnapshot()
+	{
+		var root = state.Tree?.Id == "$interface" ? state.Tree.Children.FirstOrDefault() : state.Tree;
+		var paths = new Dictionary<string, string>(StringComparer.Ordinal);
+		DesignerElementNode Copy(DesignerElementNode node, string path)
+		{
+			paths[node.Id] = path;
+			var copy = new DesignerElementNode { Id = node.Id, Name = node.Name, Type = node.Type, X = node.X, Y = node.Y, Width = node.Width, Height = node.Height, Path = path, IsDesignable = node.Id != "$interface", IsVisible = node.IsVisible };
+			for (var index = 0; index < node.Children.Count; index++)
+				copy.Children.Add(Copy(node.Children[index], path.Length == 0 ? index.ToString(System.Globalization.CultureInfo.InvariantCulture) : path + "," + index.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+			return copy;
+		}
+		var tree = root == null ? null : Copy(root, "");
+		pathById = paths;
+		return new DesignerSessionState { Accepted = true, Version = state.Version, Render = HasNativeFrame ? state.Render : null, Tree = tree };
+	}
+
+	/// <summary>The canvas's hit test. It runs on the UI thread from a pointer press, so it is
+	/// answered locally from the native GTK bounds the host already sent with the frame (the same
+	/// bounds its design/hit-test RPC uses), never with a blocking round-trip.</summary>
+	DesignCanvasHit? IDesignCanvasBackend.HitTest(double x, double y)
+	{
+		var root = state.Tree?.Id == "$interface" ? state.Tree.Children.FirstOrDefault() : state.Tree;
+		var hit = root == null ? null : NativeNodeAt(root, new Point(x, y));
+		return hit != null && pathById.TryGetValue(hit.Id, out var path) ? new DesignCanvasHit(true, path, new[] { hit.Id }) : new DesignCanvasHit(false, null, Array.Empty<string>());
+	}
+
+	/// <summary>A committed canvas drag: GTK positions nothing freely, so dropping an object onto a
+	/// sibling moves it to that sibling's place; anything else snaps back.</summary>
+	void CommitCanvasDrag(ElementDragInfo drag)
+	{
+		var previewRoot = state.Tree?.Id == "$interface" ? state.Tree.Children.FirstOrDefault() : state.Tree;
+		var source = previewRoot == null ? null : Flatten(previewRoot).FirstOrDefault(n => n.Id == drag.Name);
+		var over = previewRoot == null ? null : NativeNodeAt(previewRoot, new Point(drag.EndX + drag.EndWidth / 2, drag.EndY + drag.EndHeight / 2), source);
+		if (previewRoot == null || source == null || over == null || !ReorderBetween(previewRoot, source, over))
+			canvasController.RestoreSelection(selection.SelectedIds);
+	}
+
 	void Select(DesignerElementNode? node, bool toggle = false) => selection.Select(node == null ? Array.Empty<DesignerElementNode>() : new[] { node }, toggle ? DesignerSelectionOperation.Toggle : DesignerSelectionOperation.Replace);
-	void ConfigureCanvas() { canvas.Capabilities = DesignerCanvasCapabilities.Zoom | DesignerCanvasCapabilities.Fit | DesignerCanvasCapabilities.Gridlines; foreach (var label in new[] { "Fit", "25%", "50%", "75%", "100%", "125%", "150%", "200%" }) canvas.ZoomCombo.Items.Add(label); canvas.ZoomCombo.SelectedIndex = 4; canvas.ZoomChanged += (_, _) => { if (canvas.ZoomCombo.SelectedIndex == 0) FitView(); else Zoom = new[] { .25, .5, .75, 1, 1.25, 1.5, 2 }[canvas.ZoomCombo.SelectedIndex - 1]; }; canvas.FitRequested += (_, _) => FitView(); canvas.GridRequested += (_, show) => SetGridlines(show); scroller.Content = surface; canvas.ContentHost.Content = scroller; }
-	void FitView() { var child = surface.Child as FrameworkElement; var width = (child?.ActualWidth ?? 0) + surface.Padding.Left + surface.Padding.Right; var height = (child?.ActualHeight ?? 0) + surface.Padding.Top + surface.Padding.Bottom; FitMeasured = width > 0 && height > 0 && scroller.ViewportWidth > 0 && scroller.ViewportHeight > 0; Zoom = FitMeasured ? Math.Min(scroller.ViewportWidth / width, scroller.ViewportHeight / height) : 1; if (canvas.ZoomCombo.SelectedIndex != 0) canvas.ZoomCombo.SelectedIndex = 0; }
-	void SetGridlines(bool show) { gridlines = show; surface.Background = show ? GridBrush() : Brushes.DimGray; }
-	static Brush GridBrush() { var drawing = new GeometryDrawing(new SolidColorBrush(Color.FromRgb(70, 70, 70)), new Pen(new SolidColorBrush(Color.FromRgb(100, 100, 100)), 1), new RectangleGeometry(new Rect(0, 0, 16, 16))); var brush = new DrawingBrush(drawing) { TileMode = TileMode.Tile, Viewport = new Rect(0, 0, 16, 16), ViewportUnits = BrushMappingMode.Absolute }; brush.Freeze(); return brush; }
+	void ConfigureCanvas()
+	{
+		// Only what the GTK designer does: GTK owns layout, so no resize handles, design sizes,
+		// themes or visual states.
+		canvas.Capabilities = DesignerCanvasCapabilities.Zoom | DesignerCanvasCapabilities.Fit | DesignerCanvasCapabilities.Gridlines;
+		canvas.ResizeHandlesEnabled = false;
+		canvas.SetContextCommands(new[] { ("Delete", "delete") });
+		canvasController.ClearsSelectionOnEmptyClick = true;
+		canvasController.SelectionChanged += (_, ids) => { if (!ids.SequenceEqual(selection.SelectedIds)) pads.CommitSelection(ids); };
+		canvasController.ElementPicked += (_, id) => { if (!selection.SelectedIds.Contains(id)) SelectById(id); };
+		canvasController.ElementDragCommitted += (_, drag) => CommitCanvasDrag(drag);
+		canvasController.ElementGroupDragCommitted += (_, _) => canvasController.RestoreSelection(selection.SelectedIds);
+		canvasController.ContextCommandRequested += (_, command) => { if (command.Command == "delete") DeleteSelected(); };
+		canvasController.UndoRedoRequested += (_, undo) => { if (undo) Undo(); else Redo(); };
+		canvas.AllowDrop = true;
+		canvas.DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent(DataFormats.StringFormat) ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; };
+		canvas.Drop += (_, e) => {
+			if (e.Data.GetData(DataFormats.StringFormat) is not string type || !ToolNames.Contains(type, StringComparer.Ordinal)) return;
+			var previewRoot = state.Tree?.Id == "$interface" ? state.Tree.Children.FirstOrDefault() : state.Tree;
+			var design = canvas.ToDesignPoint(e.GetPosition(canvas));
+			var over = previewRoot == null ? null : NativeNodeAt(previewRoot, new Point(design.X, design.Y));
+			if (over != null) Select(over);
+			Add(type);
+			e.Handled = true;
+		};
+	}
+	void FitView() { canvas.FitView(); FitMeasured = canvas.HasRender && canvas.IsFitMode; }
 	static bool IsContainer(DesignerElementNode n) => n.Type is "GtkBox" or "GtkGrid" or "GtkCenterBox" or "GtkPaned" or "GtkScrolledWindow" or "GtkApplicationWindow" or "GtkWindow";
 	DesignerElementNode? NearestContainer(DesignerElementNode node) { if (state.Tree == null) return null; for (var current = node; ; ) { if (IsContainer(current)) return current; var parent = Flatten(state.Tree).FirstOrDefault(p => p.Children.Contains(current)); if (parent == null) return null; current = parent; } }
-	static DesignerElementNode? NativeNodeAt(DesignerElementNode root, Point point) => Flatten(root).Where(n => n.Width > 0 && n.Height > 0 && point.X >= n.X && point.Y >= n.Y && point.X <= n.X + n.Width && point.Y <= n.Y + n.Height).OrderBy(n => n.Width * n.Height).FirstOrDefault();
+	static DesignerElementNode? NativeNodeAt(DesignerElementNode root, Point point, DesignerElementNode? except = null) => Flatten(root).Where(n => !ReferenceEquals(n, except) && n.Width > 0 && n.Height > 0 && point.X >= n.X && point.Y >= n.Y && point.X <= n.X + n.Width && point.Y <= n.Y + n.Height).OrderBy(n => n.Width * n.Height).FirstOrDefault();
 	bool ReorderBetween(DesignerElementNode root, DesignerElementNode source, DesignerElementNode target) { var parent = Flatten(root).FirstOrDefault(p => p.Children.Contains(source) && p.Children.Contains(target)); if (parent == null) return false; var delta = parent.Children.IndexOf(target) - parent.Children.IndexOf(source); if (delta == 0) return false; Select(source); return ReorderSelected(delta); }
 	static string Value(DesignerElementNode n, string key, string fallback) => n.Properties.FirstOrDefault(p => p.Name == key)?.Value ?? fallback; static IEnumerable<DesignerElementNode> Flatten(DesignerElementNode n) => new[] { n }.Concat(n.Children.SelectMany(Flatten));
 	DesignerDocumentSnapshot Snapshot(string text, long version) => new() { Version = version, PrimaryFileName = PrimaryFile?.FileName.ToString() ?? "", Files = { new DesignerSourceFileSnapshot { FileName = PrimaryFile?.FileName.ToString() ?? "", Kind = "Designer", Text = text } } };

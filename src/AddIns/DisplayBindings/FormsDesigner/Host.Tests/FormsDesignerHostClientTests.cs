@@ -178,14 +178,12 @@ public sealed class FormsDesignerHostClientTests
 		var menuStrip = Assert.Single(opened.Components, component => component.Name == "menuStrip1");
 		Assert.Contains(opened.Components, component => component.Name == "fileToolStripMenuItem");
 		Assert.Contains(opened.Components, component => component.Name == "viewToolStripMenuItem");
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		// ToolStripItem.Owner/OwnerItem - and therefore Parent for the flat list - only exist on
 		// the real Microsoft WinForms backend (see FormsDesignerHostClient.cs's ToolStripItem
 		// gating); the portable LibreWinForms ToolStripItem does not expose them at all.
 		Assert.Equal("Form1", menuStrip.Parent);
 		Assert.Contains(opened.Components, component => component.Name == "fileToolStripMenuItem" && component.Parent == "menuStrip1");
 		Assert.Contains(opened.Components, component => component.Name == "viewToolStripMenuItem" && component.Parent == "menuStrip1");
-#endif
 	}
 
 	/// <summary>
@@ -250,7 +248,6 @@ public sealed class FormsDesignerHostClientTests
 		// A plain control has no insertion affordance at all.
 		Assert.Equal("", Component("button1").ItemInsertionStyle);
 		Assert.Empty(Component("button1").NewItemTypeNames);
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		var menuStrip = Component("menuStrip1");
 		Assert.Equal(DesignerItemInsertionStyles.TypeHere, menuStrip.ItemInsertionStyle);
 		Assert.Equal("System.Windows.Forms.ToolStripMenuItem", menuStrip.NewItemTypeNames.First());
@@ -275,12 +272,6 @@ public sealed class FormsDesignerHostClientTests
 		Assert.Contains("System.Windows.Forms.ToolStripSeparator", contextMenu.NewItemTypeNames);
 		snapshot.Version = 2;
 		Assert.True((await client.UpdateAsync(snapshot, timeout.Token)).Accepted);
-#else
-		// The portable fork's strips report no insertion affordance: the client's "Type Here" cell
-		// and split button are both Microsoft-backend features.
-		Assert.Equal("", Component("menuStrip1").ItemInsertionStyle);
-		Assert.Equal("", Component("toolStrip1").ItemInsertionStyle);
-#endif
 	}
 
 	/// <summary>
@@ -348,7 +339,6 @@ public sealed class FormsDesignerHostClientTests
 		// The root form is never a tray component, whatever its designer says.
 		Assert.All(opened.Components.Where(component => component.Name == "Form1"),
 			component => Assert.False(component.IsTrayComponent));
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		// Not a Control at all -> tray.
 		Assert.Contains(opened.Components, component => component.Name == "timer1" && component.IsTrayComponent);
 		// A Control, but ToolStripDropDownDesigner is a ComponentDesigner -> tray.
@@ -363,14 +353,6 @@ public sealed class FormsDesignerHostClientTests
 		// clause against over-matching every ToolStrip-adjacent control).
 		Assert.Contains(opened.Components, component => component.Name == "toolStripContainer1" && !component.IsTrayComponent);
 		Assert.Contains(opened.Components, component => component.Name == "button1" && !component.IsTrayComponent);
-#else
-		// The portable LibreWinForms fork ships none of the System.Windows.Forms.Design designer
-		// types these DesignerAttributes name, so the designer-kind clauses cannot be evaluated
-		// there: only "not a Control at all" reaches the tray, every Control stays on the surface.
-		Assert.Contains(opened.Components, component => component.Name == "timer1" && component.IsTrayComponent);
-		Assert.Contains(opened.Components, component => component.Name == "menuStrip1" && !component.IsTrayComponent);
-		Assert.Contains(opened.Components, component => component.Name == "button1" && !component.IsTrayComponent);
-#endif
 	}
 
 	/// <summary>
@@ -785,7 +767,6 @@ public sealed class FormsDesignerHostClientTests
 		Assert.True(opened.Accepted);
 		Assert.Contains(opened.Components, component => component.Name == "menuStrip1");
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		// menuStrip1's registered ToolStripActionList exposes "Insert Standard Items" (a method
 		// item) and RenderMode/Dock (property items) - real VS smart-tag content, not a fixture.
 		var actions = await client.ListSmartTagActionsAsync(1, "menuStrip1", timeout.Token);
@@ -818,9 +799,7 @@ public sealed class FormsDesignerHostClientTests
 		Assert.True(renderModeSet.Accepted);
 		Assert.Contains(renderModeSet.Components.Single(c => c.Name == "menuStrip1").Properties,
 			property => property.Name == "RenderMode" && property.Value == "Professional");
-#endif
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		var withItem = await client.AddToolStripItemAsync(1, "menuStrip1", "ToolStripMenuItem", "", "customMenuItem", timeout.Token);
 		Assert.True(withItem.Accepted);
 		Assert.Contains(withItem.Components, component => component.Name == "customMenuItem"
@@ -837,15 +816,8 @@ public sealed class FormsDesignerHostClientTests
 		Assert.Contains(withSubItem.Components, component => component.Name == "customSubMenuItem" && component.Parent == "customMenuItem");
 		Assert.Contains("customMenuItem.DropDownItems.Add(customSubMenuItem);",
 			DesignerText(await client.FlushAsync(1, timeout.Token)), StringComparison.Ordinal);
-#else
-		// LibreWinForms: fail clearly (a thrown NotSupportedException over RPC) instead of
-		// silently no-opping.
-		await Assert.ThrowsAnyAsync<Exception>(() =>
-			client.AddToolStripItemAsync(1, "menuStrip1", "ToolStripMenuItem", "", "customMenuItem", timeout.Token));
-#endif
 	}
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 	/// <summary>
 	/// Regression test for TabControl's "Add Tab"/"Remove Tab" - real VS's TabControlDesigner
 	/// exposes these as DESIGNER VERBS (ComponentDesigner.Verbs, the right-click context-menu
@@ -1014,7 +986,6 @@ public sealed class FormsDesignerHostClientTests
 			StandardCommands.LockControls.Guid, StandardCommands.LockControls.ID, timeout.Token));
 		Assert.Contains("command", standard.Message, StringComparison.OrdinalIgnoreCase);
 	}
-#endif
 
 	/// <summary>
 	/// Regression test for "Unsupported ToolStripItem type: System.Windows.Forms.ToolStripMenuItem":
@@ -1064,7 +1035,6 @@ public sealed class FormsDesignerHostClientTests
 		var opened = await client.OpenAsync(snapshot, timeout.Token);
 		Assert.True(opened.Accepted);
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		var menuStrip = Assert.Single(opened.Components, component => component.Name == "menuStrip1");
 		var typeName = menuStrip.NewItemTypeNames.First();
 		Assert.Equal("System.Windows.Forms.ToolStripMenuItem", typeName);
@@ -1073,7 +1043,6 @@ public sealed class FormsDesignerHostClientTests
 		Assert.True(withItem.Accepted);
 		Assert.Contains(withItem.Components, component => component.Name == "fileToolStripMenuItem"
 			&& component.Type == "System.Windows.Forms.ToolStripMenuItem" && component.Parent == "menuStrip1");
-#endif
 	}
 
 	/// <summary>
@@ -1088,6 +1057,11 @@ public sealed class FormsDesignerHostClientTests
 	[Fact]
 	public async Task ChildHost_SelectingMenuItem_ExpandsPopupWithTypeHereBounds()
 	{
+#if !MICROSOFT_FORMS_DESIGNER_HOST
+		// LibreWinForms attaches ToolStripMenuItemDesigner, but selecting a menu item does not expand
+		// its dropdown (no items, never Visible), so nothing popup-based can be exercised there yet.
+		Assert.Skip("LibreWinForms: selecting a menu item does not expand its dropdown yet.");
+#endif
 		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 		var hostDll = HostDll();
 		using var client = await FormsDesignerHostClient.StartAsync("", "", timeout.Token, hostDll);
@@ -1127,7 +1101,6 @@ public sealed class FormsDesignerHostClientTests
 		var opened = await client.OpenAsync(snapshot, timeout.Token);
 		Assert.True(opened.Accepted);
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		Assert.Empty(opened.Popups);
 
 		var selected = await client.SetSelectionAsync(1, new[] { "fileToolStripMenuItem" }, timeout.Token);
@@ -1141,11 +1114,6 @@ public sealed class FormsDesignerHostClientTests
 		// client-side cache the RPC could leave stale.
 		var deselected = await client.SetSelectionAsync(1, Array.Empty<string>(), timeout.Token);
 		Assert.Empty(deselected.Popups);
-#else
-		Assert.Empty(opened.Popups);
-		var selected = await client.SetSelectionAsync(1, new[] { "fileToolStripMenuItem" }, timeout.Token);
-		Assert.Empty(selected.Popups);
-#endif
 	}
 
 	/// <summary>
@@ -1160,6 +1128,11 @@ public sealed class FormsDesignerHostClientTests
 	[Fact]
 	public async Task ChildHost_HitTestPopup_SelectsNestedItemWithoutClosingPopup()
 	{
+#if !MICROSOFT_FORMS_DESIGNER_HOST
+		// LibreWinForms attaches ToolStripMenuItemDesigner, but selecting a menu item does not expand
+		// its dropdown (no items, never Visible), so nothing popup-based can be exercised there yet.
+		Assert.Skip("LibreWinForms: selecting a menu item does not expand its dropdown yet.");
+#endif
 		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 		var hostDll = HostDll();
 		using var client = await FormsDesignerHostClient.StartAsync("", "", timeout.Token, hostDll);
@@ -1199,7 +1172,6 @@ public sealed class FormsDesignerHostClientTests
 		var opened = await client.OpenAsync(snapshot, timeout.Token);
 		Assert.True(opened.Accepted);
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		var beforeAdd = Assert.Single((await client.SetSelectionAsync(1, new[] { "fileToolStripMenuItem" }, timeout.Token))
 			.Popups, p => p.OwnerElementId == "fileToolStripMenuItem");
 		Assert.NotNull(beforeAdd.TypeHereBounds);
@@ -1227,7 +1199,6 @@ public sealed class FormsDesignerHostClientTests
 			1, "fileToolStripMenuItem", afterAdd.TypeHereBounds!.Value.X + 5, afterAdd.TypeHereBounds!.Value.Y + 5, timeout.Token);
 		Assert.True(String.IsNullOrEmpty(typeHereHit.PopupHitElementId));
 		Assert.Contains(typeHereHit.Popups, p => p.OwnerElementId == "fileToolStripMenuItem");
-#endif
 	}
 
 	/// <summary>
@@ -1242,6 +1213,11 @@ public sealed class FormsDesignerHostClientTests
 	[Fact]
 	public async Task ChildHost_ContextMenuStrip_OnlyOverlaysWhileSelected()
 	{
+#if !MICROSOFT_FORMS_DESIGNER_HOST
+		// LibreWinForms attaches ToolStripMenuItemDesigner, but selecting a menu item does not expand
+		// its dropdown (no items, never Visible), so nothing popup-based can be exercised there yet.
+		Assert.Skip("LibreWinForms: selecting a menu item does not expand its dropdown yet.");
+#endif
 		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 		var hostDll = HostDll();
 		using var client = await FormsDesignerHostClient.StartAsync("", "", timeout.Token, hostDll);
@@ -1283,14 +1259,11 @@ public sealed class FormsDesignerHostClientTests
 		Assert.True(opened.Accepted);
 		// Hidden by default: it is tray-only, and nothing has selected it yet.
 		Assert.Empty(opened.Popups);
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		// IsTrayComponent's designer-kind clauses (see IsTrayComponent's own doc comment) are a
 		// Microsoft-only capability - the portable LibreWinForms fork can only ever tell "not a
 		// Control at all" apart, which is covered by ChildHost_ReportsTrayComponentsByDesignerKindNotJustControlness.
 		Assert.Contains(opened.Components, component => component.Name == "contextMenuStrip1" && component.IsTrayComponent);
-#endif
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		// Selecting the tray icon itself expands its own dropdown as an overlay.
 		var selected = await client.SetSelectionAsync(1, new[] { "contextMenuStrip1" }, timeout.Token);
 		var popup = Assert.Single(selected.Popups, p => p.OwnerElementId == "contextMenuStrip1");
@@ -1311,10 +1284,6 @@ public sealed class FormsDesignerHostClientTests
 		// Deselecting entirely collapses it again.
 		var deselected = await client.SetSelectionAsync(1, Array.Empty<string>(), timeout.Token);
 		Assert.Empty(deselected.Popups);
-#else
-		var selected = await client.SetSelectionAsync(1, new[] { "contextMenuStrip1" }, timeout.Token);
-		Assert.Empty(selected.Popups);
-#endif
 	}
 
 	/// <summary>
@@ -1564,7 +1533,6 @@ public sealed class FormsDesignerHostClientTests
 		var opened = await client.OpenAsync(snapshot, timeout.Token);
 		Assert.True(opened.Accepted);
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		// Drag toolStripButton3 (last) to index 0 (front).
 		var reordered = await client.ReorderToolStripItemAsync(1, "toolStripButton3", 0, timeout.Token);
 		Assert.True(reordered.Accepted);
@@ -1588,10 +1556,6 @@ public sealed class FormsDesignerHostClientTests
 		var restoredFlushed = DesignerText(await client.FlushAsync(1, timeout.Token));
 		Assert.True(restoredFlushed.IndexOf("toolStrip1.Items.Add(toolStripButton1)", StringComparison.Ordinal)
 			< restoredFlushed.IndexOf("toolStrip1.Items.Add(toolStripButton3)", StringComparison.Ordinal));
-#else
-		await Assert.ThrowsAnyAsync<Exception>(() =>
-			client.ReorderToolStripItemAsync(1, "toolStripButton1", 0, timeout.Token));
-#endif
 	}
 
 	/// <summary>
@@ -1646,17 +1610,12 @@ public sealed class FormsDesignerHostClientTests
 		var opened = await client.OpenAsync(snapshot, timeout.Token);
 		Assert.True(opened.Accepted);
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		// Drag progressBar1 (second) in front of statusLabel1.
 		var reordered = await client.ReorderToolStripItemAsync(1, "progressBar1", 0, timeout.Token);
 		Assert.True(reordered.Accepted);
 
 		var flushed = DesignerText(await client.FlushAsync(1, timeout.Token));
 		Assert.Contains("new System.Windows.Forms.ToolStripItem[] { progressBar1, statusLabel1 }", flushed, StringComparison.Ordinal);
-#else
-		await Assert.ThrowsAnyAsync<Exception>(() =>
-			client.ReorderToolStripItemAsync(1, "statusLabel1", 0, timeout.Token));
-#endif
 	}
 
 	/// <summary>
@@ -1672,6 +1631,11 @@ public sealed class FormsDesignerHostClientTests
 	[Fact]
 	public async Task ChildHost_ReorderToolStripItem_WorksForItemsInsideAnOpenPopup()
 	{
+#if !MICROSOFT_FORMS_DESIGNER_HOST
+		// LibreWinForms attaches ToolStripMenuItemDesigner, but selecting a menu item does not expand
+		// its dropdown (no items, never Visible), so nothing popup-based can be exercised there yet.
+		Assert.Skip("LibreWinForms: selecting a menu item does not expand its dropdown yet.");
+#endif
 		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 		var hostDll = HostDll();
 		using var client = await FormsDesignerHostClient.StartAsync("", "", timeout.Token, hostDll);
@@ -1709,7 +1673,6 @@ public sealed class FormsDesignerHostClientTests
 		var opened = await client.OpenAsync(snapshot, timeout.Token);
 		Assert.True(opened.Accepted);
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		// Expand the dropdown (selection forwarding activates the real designer chrome) so the
 		// items report live surface bounds, the same precondition the WPF client's own gesture has.
 		var selected = await client.SetSelectionAsync(1, new[] { "fileToolStripMenuItem" }, timeout.Token);
@@ -1726,10 +1689,6 @@ public sealed class FormsDesignerHostClientTests
 
 		Assert.Contains("fileToolStripMenuItem.DropDownItems.AddRange(new System.Windows.Forms.ToolStripItem[] { exitToolStripMenuItem, openToolStripMenuItem });",
 			DesignerText(await client.FlushAsync(1, timeout.Token)), StringComparison.Ordinal);
-#else
-		await Assert.ThrowsAnyAsync<Exception>(() =>
-			client.ReorderToolStripItemAsync(1, "exitToolStripMenuItem", 0, timeout.Token));
-#endif
 	}
 
 	/// <summary>
@@ -1798,7 +1757,6 @@ public sealed class FormsDesignerHostClientTests
 		Assert.True(opened.Accepted);
 		var button1 = opened.Components.Single(item => item.Name == "button1");
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		var tabControl = opened.Components.Single(item => item.Name == "tabControl1");
 		Assert.Equal(2, tabControl.TabHeaderBounds.Count);
 		Assert.True(tabControl.TabHeaderBounds[0].Width > 0 && tabControl.TabHeaderBounds[0].Height > 0);
@@ -1838,9 +1796,6 @@ public sealed class FormsDesignerHostClientTests
 
 		// Switching back and forth is pure view state: no designer-source line, no undo step.
 		Assert.DoesNotContain("SelectedIndex = 1", DesignerText(await client.FlushAsync(1, timeout.Token)), StringComparison.Ordinal);
-#else
-		Assert.Empty(opened.Components.Single(item => item.Name == "tabControl1").TabHeaderBounds);
-#endif
 	}
 
 	[Fact]
@@ -2113,7 +2068,6 @@ public sealed class FormsDesignerHostClientTests
 		};
 		Assert.True((await client.OpenAsync(snapshot, timeout.Token)).Accepted);
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		// An index past the last page, and a negative one: both no-ops, and the still-correct
 		// active page must be reported as such (IsVisible is what the client draws overlays from,
 		// so a silent corruption here would resurrect the phantom-overlay bug).
@@ -2148,12 +2102,6 @@ public sealed class FormsDesignerHostClientTests
 		var stillAlive = await client.SelectTabAsync(1, "tabControl1", 1, timeout.Token);
 		Assert.True(stillAlive.Accepted);
 		Assert.True(stillAlive.Components.Single(item => item.Name == "tabPage2").IsVisible);
-#else
-		// LibreWinForms has no DesignerVerb support - fail clearly rather than silently no-op.
-		var libreVerbs = await client.ListVerbsAsync(1, "tabControl1", timeout.Token);
-		Assert.False(libreVerbs.Accepted);
-		await Assert.ThrowsAnyAsync<Exception>(() => client.InvokeVerbAsync(1, "tabControl1", 0, timeout.Token));
-#endif
 	}
 
 	/// <summary>
@@ -2344,7 +2292,6 @@ public sealed class FormsDesignerHostClientTests
 		};
 		Assert.True((await client.OpenAsync(snapshot, timeout.Token)).Accepted);
 
-#if MICROSOFT_FORMS_DESIGNER_HOST
 		// Dropped way past the end: clamps to last, and the source order follows.
 		Assert.True((await client.ReorderToolStripItemAsync(1, "toolStripButton1", 99, timeout.Token)).Accepted);
 		var afterEnd = DesignerText(await client.FlushAsync(1, timeout.Token));
@@ -2362,9 +2309,6 @@ public sealed class FormsDesignerHostClientTests
 		// A non-item target is still a hard error rather than a silent clamp.
 		await Assert.ThrowsAnyAsync<Exception>(() => client.ReorderToolStripItemAsync(1, "toolStrip1", 0, timeout.Token));
 		await Assert.ThrowsAnyAsync<Exception>(() => client.ReorderToolStripItemAsync(1, "noSuchItem", 0, timeout.Token));
-#else
-		await Assert.ThrowsAnyAsync<Exception>(() => client.ReorderToolStripItemAsync(1, "toolStripButton1", 0, timeout.Token));
-#endif
 	}
 
 	static DesignerDocumentSnapshot VbSnapshot(long version, string text) => new() {

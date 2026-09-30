@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- winui-xaml-ls: the XAML language server for WinUI (Windows App SDK) projects, and only for
+       them. Each XAML runtime has its own server (wpf-xaml-ls, librewpf-xaml-ls, uno-xaml-ls, progpu-winui-xaml-ls, maui-xaml-ls); see
+       doc/technotes/xaml-language-servers.md. It reads WinUI metadata only, so it builds and runs
+       on any OS - no Windows App SDK runtime is loaded. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>winui-xaml-ls</AssemblyName>
+    <RootNamespace>ICSharpCode.WinUIXamlDesigner.LanguageServer.WinUI</RootNamespace>
+    <!-- Started by path as a managed dll (dotnet exec), never through an apphost. -->
+    <OpenDevelopAddin>true</OpenDevelopAddin>
+    <OpenDevelopAddinKind>OutOfProcessHost</OpenDevelopAddinKind>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\..\..\externals\vscode-wpf\external\wxsg\external\XamlToCSharpGenerator\src\XamlToCSharpGenerator.LanguageServer\XamlToCSharpGenerator.LanguageServer.csproj" />
+    <ProjectReference Include="..\..\..\..\..\externals\vscode-wpf\external\wxsg\external\XamlToCSharpGenerator\src\XamlToCSharpGenerator.LanguageService\XamlToCSharpGenerator.LanguageService.csproj" />
+    <ProjectReference Include="..\..\..\..\..\externals\vscode-wpf\external\wxsg\external\XamlToCSharpGenerator\src\XamlToCSharpGenerator.LanguageService.Framework.WinUI\XamlToCSharpGenerator.LanguageService.Framework.WinUI.csproj" />
+  </ItemGroup>
+  <!-- Deploy the runnable server into AddIns/LanguageServices/WinUIXamlLanguageServer/, where the
+       WinUI designer addin looks for it (and which dist.ps1 / the macOS bundle keep as an
+       out-of-process folder). -->
+  <Target Name="DeployToAddIns" AfterTargets="Build">
+    <ItemGroup>
+      <LanguageServerOutput Include="$(TargetDir)**" />
+    </ItemGroup>
+    <Copy SourceFiles="@(LanguageServerOutput)" SkipUnchangedFiles="true"
+          DestinationFiles="@(LanguageServerOutput->'$(MSBuildProjectDirectory)\..\..\..\..\..\AddIns\LanguageServices\WinUIXamlLanguageServer\%(RecursiveDir)%(Filename)%(Extension)')" />
+  </Target>
+</Project>

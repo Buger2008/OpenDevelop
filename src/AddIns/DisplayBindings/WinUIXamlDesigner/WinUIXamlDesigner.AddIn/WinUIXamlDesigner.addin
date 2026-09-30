@@ -1,6 +1,13 @@
 <AddIn name="WinUI and Uno XAML Designer" author="LeXtudio" description="Visual designer for WinUI 3 and Uno Platform XAML." addInManagerHidden="preinstalled">
-  <Manifest><Identity name="ICSharpCode.WinUIXamlDesigner" /></Manifest>
+  <Manifest>
+    <Identity name="ICSharpCode.WinUIXamlDesigner" />
+    <!-- The shared design canvas (DesignSurface, DesignSurfaceController); see
+         doc/technotes/designer-canvas-addin.md. -->
+    <Dependency addin="ICSharpCode.DesignerCanvas" requirePreload="true" />
+  </Manifest>
   <Runtime>
+    <Import assembly="$ICSharpCode.DesignerCanvas/ICSharpCode.DesignerCanvas.dll" />
+    <Import assembly="$ICSharpCode.DesignerCanvas/ICSharpCode.Designer.Presentation.dll" />
     <Import assembly="ICSharpCode.WinUIXamlDesigner.dll" />
     <Import assembly="ICSharpCode.WinUIXamlDesigner.ProGPUHost.dll" />
     <Import assembly="ICSharpCode.WinUIXamlDesigner.UnoDesignHost.dll" />
@@ -10,5 +17,6 @@
   </Path>
   <Path name="/SharpDevelop/Autostart">
     <Class id="ICSharpCode.WinUIXamlDesigner.RegisterDevFlowActionsCommand" class="ICSharpCode.WinUIXamlDesigner.RegisterDevFlowActionsCommand" />
+    <Class id="ICSharpCode.WinUIXamlDesigner.RegisterXamlLanguageServersCommand" class="ICSharpCode.WinUIXamlDesigner.RegisterXamlLanguageServersCommand" />
   </Path>
 </AddIn>

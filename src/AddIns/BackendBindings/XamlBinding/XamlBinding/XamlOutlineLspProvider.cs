@@ -21,9 +21,9 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
+using ICSharpCode.SharpDevelop;
 using ICSharpCode.SharpDevelop.Editor;
 using ICSharpCode.SharpDevelop.LanguageServices;
-using ICSharpCode.SharpDevelop.LanguageServices.Lsp;
 
 namespace ICSharpCode.XamlBinding
 {
@@ -39,13 +39,12 @@ namespace ICSharpCode.XamlBinding
 			if (editor.FileName == null)
 				return Array.Empty<DocumentOutlineNode>();
 
-			// LspServiceManager.GetService already caches per (languageId, workspace root) and
-			// resolves the workspace root correctly (walks up from the file for a *.sln*/*.*proj
-			// marker) - no need for a second private cache/registry here, and no risk of drifting
-			// out of sync with whatever XamlBinding's RegisterXamlLanguageServiceCommand
-			// registered for ".xaml" at addin startup.
-			var service = LspServiceManager.GetService(editor.FileName);
-			if (service == null)
+			// Through the registry, like every other editor feature: its ".xaml" resolver picks the
+			// server for this file's framework and project. Asking LspServiceManager by extension
+			// instead bypassed that routing and started a second, WPF-only server for a MAUI page,
+			// whose outline then came from WPF's analysis of MAUI markup.
+			var registry = SD.GetService<LanguageServiceRegistry>();
+			if (registry == null || !registry.TryGetService(editor.FileName, out var service) || service == null)
 				return Array.Empty<DocumentOutlineNode>();
 
 			var documentId = new DocumentId(editor.FileName);

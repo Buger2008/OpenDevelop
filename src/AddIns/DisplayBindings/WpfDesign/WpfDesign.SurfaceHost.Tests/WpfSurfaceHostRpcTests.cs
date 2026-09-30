@@ -1028,6 +1028,192 @@ public sealed class WpfSurfaceHostRpcTests
 	}
 
 	[Fact]
+	public async Task AppXamlStaticResource_ResolvesWithoutInjectingIntoTheSavedXaml()
+	{
+		// The child used to splice App.xaml's resources into the page text (and rewrite its pack
+		// URIs) before parsing so a page-level {StaticResource} could see them. The parsed text is
+		// the document model, so that splice was written back into the user's file on save. The
+		// key must still resolve (Width 250 proves it), and the flush must add nothing but the edit.
+		const string appXaml = """
+			<Application xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+			  <Application.Resources>
+			    <Style x:Key="WideText" TargetType="TextBlock">
+			      <Setter Property="Width" Value="250"/>
+			    </Style>
+			  </Application.Resources>
+			</Application>
+			""";
+		const string pageXaml = """
+			<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Width="400" Height="300">
+			  <TextBlock x:Name="styled" Text="Hi" Style="{StaticResource WideText}"/>
+			  <Image x:Name="logo" Source="pack://application:,,,/Assets/logo.png"/>
+			</Grid>
+			""";
+		var snapshot = new DesignerDocumentSnapshot {
+			Version = 1,
+			PrimaryFileName = "/project/Page.xaml",
+			Files = {
+				new DesignerSourceFileSnapshot { FileName = "/project/Page.xaml", Kind = "Source", Text = pageXaml },
+				new DesignerSourceFileSnapshot { FileName = "/project/App.xaml", Kind = "AppXaml", Text = appXaml }
+			}
+		};
+
+		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+		using var client = await WpfSurfaceHostClient.StartAsync(HostDll(), timeout.Token);
+		var opened = await client.OpenAsync(snapshot, timeout.Token);
+		Assert.True(opened.Accepted, opened.Error);
+		var styled = FindByName(opened.Tree!, "styled");
+		Assert.True(styled != null, "the TextBlock did not appear in the element tree");
+		Assert.Equal(250d, styled!.Width);
+
+		var edited = await client.SetPropertyAsync(1, styled.Id, "Text", "Edited", timeout.Token);
+		Assert.True(edited.Accepted, edited.Error);
+		var text = (await client.FlushAsync(1, timeout.Token)).Files.Single().Text;
+		Assert.Contains("Edited", text, StringComparison.Ordinal);
+		Assert.DoesNotContain("Grid.Resources", text, StringComparison.Ordinal);
+		Assert.DoesNotContain("MergedDictionaries", text, StringComparison.Ordinal);
+		Assert.DoesNotContain(";component/", text, StringComparison.Ordinal);
+		Assert.Contains("Source=\"pack://application:,,,/Assets/logo.png\"", text, StringComparison.Ordinal);
+	}
+
+	// Hand-formatted on purpose: multi-line start tags, a comment, single quotes, an entity and
+	// no trailing newline are exactly what a regenerating save used to destroy.
+	const string FormattedXaml =
+		"<Grid xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\"\n" +
+		"      xmlns:x=\"http://schemas.microsoft.com/winfx/2006/xaml\"\n" +
+		"      Width=\"400\" Height=\"300\">\n" +
+		"    <!-- keep me -->\n" +
+		"    <TextBlock x:Name=\"greeting\"\n" +
+		"               Text='Hello &amp; welcome'\n" +
+		"               Width=\"200\" />\n" +
+		"    <Button x:Name=\"go\" Content=\"Go\" Width=\"80\"/>\n" +
+		"</Grid>";
+
+	[Fact]
+	public async Task Flush_ChangesOnlyTheEditedAttribute()
+	{
+		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+		using var client = await WpfSurfaceHostClient.StartAsync(HostDll(), timeout.Token);
+		var opened = await client.OpenAsync(Snapshot(1, FormattedXaml), timeout.Token);
+		Assert.True(opened.Accepted, opened.Error);
+		var go = FindByName(opened.Tree!, "go")!;
+
+		Assert.True((await client.SetPropertyAsync(1, go.Id, "Content", "Run", timeout.Token)).Accepted);
+		var text = (await client.FlushAsync(1, timeout.Token)).Files.Single().Text;
+		Assert.Equal(FormattedXaml.Replace("Content=\"Go\"", "Content=\"Run\""), text);
+	}
+
+	[Fact]
+	public async Task Flush_DeleteAndAdd_TouchOnlyTheirOwnLines()
+	{
+		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+		using var client = await WpfSurfaceHostClient.StartAsync(HostDll(), timeout.Token);
+		var opened = await client.OpenAsync(Snapshot(1, FormattedXaml), timeout.Token);
+		Assert.True(opened.Accepted, opened.Error);
+		var go = FindByName(opened.Tree!, "go")!;
+
+		Assert.True((await client.DeleteElementsAsync(1, new[] { go.Id }, timeout.Token)).Accepted);
+		var deleted = (await client.FlushAsync(1, timeout.Token)).Files.Single().Text;
+		Assert.Equal(FormattedXaml.Replace("\n    <Button x:Name=\"go\" Content=\"Go\" Width=\"80\"/>", ""), deleted);
+
+		var toolboxItem = new DesignerToolboxItemInfo {
+			TypeName = "CheckBox",
+			XamlNamespace = "http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		};
+		var added = await client.AddElementAsync(1, opened.Tree!.Id, toolboxItem, "added", 10, 10, timeout.Token);
+		Assert.True(added.Accepted, added.Error);
+		var text = (await client.FlushAsync(1, timeout.Token)).Files.Single().Text;
+		var lines = text.Split('\n');
+		var originalLines = deleted.Split('\n');
+		// Every original line survives verbatim and exactly one line - the CheckBox - is new,
+		// indented like its siblings.
+		Assert.Equal(originalLines.Length + 1, lines.Length);
+		var newLine = Assert.Single(lines.Except(originalLines));
+		Assert.StartsWith("    <CheckBox ", newLine, StringComparison.Ordinal);
+		Assert.Contains("x:Name=\"added\"", newLine, StringComparison.Ordinal);
+		Assert.DoesNotContain("xmlns", newLine, StringComparison.Ordinal);
+		Assert.EndsWith("</Grid>", text, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task Flush_Reorder_MovesOnlyTheMovedElement()
+	{
+		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+		using var client = await WpfSurfaceHostClient.StartAsync(HostDll(), timeout.Token);
+		var opened = await client.OpenAsync(Snapshot(1, FormattedXaml), timeout.Token);
+		Assert.True(opened.Accepted, opened.Error);
+		var go = FindByName(opened.Tree!, "go")!;
+
+		var moved = await client.MoveElementAsync(1, go.Id, -1, timeout.Token);
+		Assert.True(moved.Accepted, moved.Error);
+		var text = (await client.FlushAsync(moved.Version, timeout.Token)).Files.Single().Text;
+		// The comment and the multi-line TextBlock are untouched; the Button now precedes the
+		// TextBlock, rewritten on its own line at the siblings' indent.
+		var textBlock = "    <TextBlock x:Name=\"greeting\"\n               Text='Hello &amp; welcome'\n               Width=\"200\" />";
+		Assert.Contains("<!-- keep me -->", text, StringComparison.Ordinal);
+		Assert.Contains(textBlock, text, StringComparison.Ordinal);
+		var buttonAt = text.IndexOf("<Button ", StringComparison.Ordinal);
+		Assert.True(buttonAt >= 0 && buttonAt < text.IndexOf("<TextBlock", StringComparison.Ordinal), text);
+		Assert.Equal(FormattedXaml.Split('\n').Length, text.Split('\n').Length);
+		Assert.EndsWith("</Grid>", text, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task Flush_TextContentEdit_ChangesOnlyTheText()
+	{
+		const string xaml =
+			"<StackPanel xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\"\n" +
+			"            xmlns:x=\"http://schemas.microsoft.com/winfx/2006/xaml\">\n" +
+			"    <Button x:Name=\"go\"\n" +
+			"            Width=\"80\">Go</Button>\n" +
+			"    <TextBlock x:Name=\"other\" Text=\"Other\" />\n" +
+			"</StackPanel>\n";
+		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+		using var client = await WpfSurfaceHostClient.StartAsync(HostDll(), timeout.Token);
+		var opened = await client.OpenAsync(Snapshot(1, xaml), timeout.Token);
+		Assert.True(opened.Accepted, opened.Error);
+		var go = FindByName(opened.Tree!, "go")!;
+
+		Assert.True((await client.SetPropertyAsync(1, go.Id, "Content", "Run", timeout.Token)).Accepted);
+		var text = (await client.FlushAsync(1, timeout.Token)).Files.Single().Text;
+		// Whether the designer keeps the value as element text or moves it to an attribute, nothing
+		// outside the Button may change.
+		Assert.Contains("Run", text, StringComparison.Ordinal);
+		Assert.DoesNotContain(">Go<", text, StringComparison.Ordinal);
+		Assert.StartsWith(xaml.Substring(0, xaml.IndexOf("    <Button", StringComparison.Ordinal)), text, StringComparison.Ordinal);
+		Assert.EndsWith("\n    <TextBlock x:Name=\"other\" Text=\"Other\" />\n</StackPanel>\n", text, StringComparison.Ordinal);
+		Assert.Contains("<Button x:Name=\"go\"\n            Width=\"80\"", text, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task ApplicationPackUri_InAFontFamily_ResolvesAgainstTheProjectWithoutChangingTheText()
+	{
+		// FontFamily is neither Uri nor ImageSource, the two types the parser used to map. An
+		// assembly-less pack URI must still name the designed project (not this host) on the
+		// instance, while the saved text keeps exactly what the user wrote.
+		var fixtureDll = CustomControlFixtureDll();
+		Assert.True(File.Exists(fixtureDll), "CustomControlFixture must be built before this test runs: " + fixtureDll);
+		const string xaml =
+			"<Grid xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\" xmlns:x=\"http://schemas.microsoft.com/winfx/2006/xaml\" Width=\"400\" Height=\"300\">\n" +
+			"  <TextBlock x:Name=\"glyph\" Text=\"A\" FontFamily=\"pack://application:,,,/Fonts/#Symbols\" />\n" +
+			"</Grid>";
+		var snapshot = Snapshot(1, xaml);
+		snapshot.ProjectAssemblyPath = fixtureDll;
+
+		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+		using var client = await WpfSurfaceHostClient.StartAsync(HostDll(), timeout.Token);
+		var opened = await client.OpenAsync(snapshot, timeout.Token);
+		Assert.True(opened.Accepted, opened.Error);
+		var glyph = FindByName(opened.Tree!, "glyph")!;
+		var fontFamily = glyph.Properties.Single(p => p.Name == "FontFamily");
+		Assert.Equal("pack://application:,,,/CustomControlFixture;component/Fonts/#Symbols", fontFamily.Value);
+
+		Assert.True((await client.SetPropertyAsync(1, glyph.Id, "Text", "B", timeout.Token)).Accepted);
+		var text = (await client.FlushAsync(1, timeout.Token)).Files.Single().Text;
+		Assert.Equal(xaml.Replace("Text=\"A\"", "Text=\"B\""), text);
+	}
+
+	[Fact]
 	public async Task StaleMutations_AreRejectedAndCannotOverwriteNewerSource()
 	{
 		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));

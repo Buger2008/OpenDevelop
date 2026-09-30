@@ -14,6 +14,7 @@ using System.Xml.Linq;
 using ICSharpCode.Core;
 using ICSharpCode.SharpDevelop;
 using ICSharpCode.SharpDevelop.Designer;
+using ICSharpCode.SharpDevelop.Designer.Surface;
 using ICSharpCode.SharpDevelop.Designer.Presentation;
 using ICSharpCode.SharpDevelop.Designer.Remote;
 using ICSharpCode.SharpDevelop.LanguageServices.Xaml;
@@ -36,10 +37,13 @@ namespace ICSharpCode.WinUIXamlDesigner.UnoDesignHost;
 /// XamlReader, lays it out and renders it to a PNG that is displayed here. All state
 /// crossings are JSON over loopback TCP - no WinUI type ever enters this process.
 /// </summary>
-sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOverlay, IWinUIXamlDesignView, IWinUIXamlDirectManipulation, IWinUIXamlTextEditing, IWinUIXamlToolboxCatalog, IWinUIXamlLifecycleProbe, IWinUIXamlPathPick, IWinUIXamlTheme, IWinUIXamlVisualStates, IWinUIXamlMultiSelection, IWinUIXamlContextCommands, IWinUIXamlGridGuides, IWinUIXamlDiagnostics, IWinUIXamlIncrementalRender
+sealed class UnoDesignRuntimeHost : IDesignCanvasBackend, IWinUIXamlRuntimeHost, IWinUIXamlSelectionOverlay, IWinUIXamlDesignView, IWinUIXamlDirectManipulation, IWinUIXamlTextEditing, IWinUIXamlToolboxCatalog, IWinUIXamlLifecycleProbe, IWinUIXamlPathPick, IWinUIXamlTheme, IWinUIXamlVisualStates, IWinUIXamlMultiSelection, IWinUIXamlContextCommands, IWinUIXamlGridGuides, IWinUIXamlDiagnostics, IWinUIXamlIncrementalRender
 {
-	readonly UnoDesignSurfaceControl surface = new();
-	readonly HashSet<string> selectableNames = new(StringComparer.Ordinal);
+	// The shared design canvas (ICSharpCode.DesignerCanvas addin): the surface, and the controller
+	// that owns selection, drags and picking over it. This class is only the Uno/WinUI backend:
+	// it talks to the child design host and answers the controller's hit tests.
+	readonly DesignSurface surface = new();
+	readonly DesignSurfaceController canvas;
 	readonly System.Windows.Threading.Dispatcher dispatcher;
 	readonly string projectDirectory;
 	readonly string documentFileName;
@@ -48,9 +52,7 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 	readonly string hostDisplayName;
 	UnoDesignClient client;
 	Task connectTask;
-	DesignSnapshot lastSnapshot;
-	Dictionary<string, ElementNode> nodesByName = new();
-	string lastPickDiagnostic = "no click yet";
+	DesignSnapshot lastSnapshot => canvas.LastSnapshot;
 	string lastLoadedText;
 	System.Windows.Threading.DispatcherTimer scaleTimer;
 	double lastRenderDpi = 1.0;
@@ -82,17 +84,18 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 		surface.DesignThemeRequested += OnSurfaceThemeRequested;
 		surface.DesignVisualStateRequested += OnSurfaceVisualStateRequested;
 		surface.SizePresetRequested += OnSurfaceSizePresetRequested;
-		surface.ContextCommandRequested += OnSurfaceContextCommandRequested;
-		surface.NudgeRequested += OnSurfaceNudgeRequested;
-		surface.UndoRedoRequested += OnSurfaceUndoRedoRequested;
-		surface.SurfacePointerPressed += OnSurfacePointerPressed;
-		surface.ElementResolver = ResolveNameAt;
-		surface.SurfaceElementDragStarted += OnSurfaceElementDragStarted;
-		surface.SurfaceElementDragDelta += OnSurfaceElementDragDelta;
-		surface.SurfaceElementDragCommitted += OnSurfaceElementDragCommitted;
-		surface.SurfaceElementDoubleClicked += OnSurfaceElementDoubleClicked;
-		surface.TextEditCommitted += OnSurfaceTextEditCommitted;
-		surface.GridGuideDragCommitted += OnSurfaceGridGuideDragCommitted;
+		canvas = new DesignSurfaceController(surface, this);
+		canvas.ElementPicked += (_, name) => ElementPicked?.Invoke(this, name);
+		canvas.ElementPathPicked += (_, path) => ElementPathPicked?.Invoke(this, path);
+		canvas.SelectionChanged += (_, names) => SelectionChanged?.Invoke(this, names);
+		canvas.ElementDragCommitted += (_, info) => ElementDragCommitted?.Invoke(this, info);
+		canvas.ElementGroupDragCommitted += (_, moves) => ElementGroupDragCommitted?.Invoke(this, moves);
+		canvas.ElementDoubleClicked += (_, info) => ElementDoubleClicked?.Invoke(this, info);
+		canvas.TextEditCommitted += (_, text) => TextEditCommitted?.Invoke(this, text);
+		canvas.GridGuideDragCommitted += (_, args) => GridGuideDragCommitted?.Invoke(this, args);
+		canvas.ContextCommandRequested += (_, args) => ContextCommandRequested?.Invoke(this, args);
+		canvas.NudgeRequested += (_, delta) => NudgeRequested?.Invoke(this, delta);
+		canvas.UndoRedoRequested += (_, undo) => UndoRedoRequested?.Invoke(this, undo);
 		LoadSettings();
 		if (settingsGridlines)
 			surface.SetGridlines(true);
@@ -169,35 +172,26 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 	/// <summary>Raised with a design-surface context-menu command and the primary selection.</summary>
 	public event EventHandler<(string Command, string Name)> ContextCommandRequested;
 
-	void OnSurfaceContextCommandRequested(object sender, (string Command, string Name) args)
-		=> ContextCommandRequested?.Invoke(this, args);
 
 	/// <summary>Raised when a Grid row/column divider drag commits (name, isRow, index, design position).</summary>
 	public event EventHandler<(string Name, bool IsRow, int Index, double Position)> GridGuideDragCommitted;
 
-	void OnSurfaceGridGuideDragCommitted(object sender, (string Name, bool IsRow, int Index, double Position) args)
-		=> GridGuideDragCommitted?.Invoke(this, args);
 
 	/// <summary>Shows the row/column divider guides over the named Grid (design-space rect
 	/// plus divider offsets); empty offsets hide them.</summary>
 	public void SetGridGuides(string name, double x, double y, double width, double height, double[] rowOffsets, double[] colOffsets)
-		=> dispatcher.BeginInvoke(() => surface.SetGridGuides(name, x, y, width, height, rowOffsets, colOffsets));
+		=> canvas.SetGridGuides(name, x, y, width, height, rowOffsets, colOffsets);
 
 	/// <summary>Hides the Grid divider guides.</summary>
-	public void ClearGridGuides()
-		=> dispatcher.BeginInvoke(() => surface.SetGridGuides(null, 0, 0, 0, 0, Array.Empty<double>(), Array.Empty<double>()));
+	public void ClearGridGuides() => canvas.ClearGridGuides();
 
 	/// <summary>Raised when the user nudges the selection with arrow keys (design units).</summary>
 	public event EventHandler<(double DX, double DY)> NudgeRequested;
 
-	void OnSurfaceNudgeRequested(object sender, (double DX, double DY) delta)
-		=> NudgeRequested?.Invoke(this, delta);
 
 	/// <summary>Raised when the user presses Ctrl+Z/Ctrl+Y on the surface (undo: true/false).</summary>
 	public event EventHandler<bool> UndoRedoRequested;
 
-	void OnSurfaceUndoRedoRequested(object sender, bool undo)
-		=> UndoRedoRequested?.Invoke(this, undo);
 
 	void OnSurfaceSizePresetRequested(object sender, string preset)
 	{
@@ -415,44 +409,11 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 
 	#region Tab order
 
-	bool showTabOrder;
+	public bool ShowTabOrder => canvas.ShowTabOrder;
 
-	/// <summary>Whether the tab-order badge overlay is currently shown.</summary>
-	public bool ShowTabOrder => showTabOrder;
-
-	/// <summary>Toggles the tab-order badge overlay - a small numbered badge near every element
-	/// that reports a TabIndex property (<c>DesignHost.BuildTree</c> already populates it per
-	/// node), matching <c>RemoteFormsDesignerControl.SetTabOrderMode</c>'s own toggle.</summary>
-	public void SetTabOrderMode(bool show)
-	{
-		showTabOrder = show;
-		RefreshTabOrderBadges();
-	}
-
-	/// <summary>Re-pushes the tab-order badges from the current <see cref="nodesByName"/> tree -
-	/// called on toggle-on and whenever the tree is rebuilt while the view is already on, so
-	/// badges stay in sync with edits.</summary>
-	void RefreshTabOrderBadges()
-	{
-		if (!showTabOrder)
-		{
-			dispatcher.BeginInvoke(() => surface.SetTabOrderBadges(Array.Empty<(string, double, double, string)>()));
-			return;
-		}
-		var badges = nodesByName.Values
-			// IsVisible: a hidden element still reports the X/Y it WOULD sit at, and every tab of a
-			// tab control occupies the same rect - so badging one stacks it on top of the badge for
-			// whichever tab IS showing, misattributing tab indices to the wrong controls. See
-			// DesignerElementNode.IsVisible; the WinForms surface shipped this same bug in its
-			// always-on overlays, where it read as a rendering fault for hours.
-			.Where(node => node.Name != null && node.IsVisible)
-			.Select(node => (Name: node.Name!, node.X, node.Y,
-				TabIndex: node.Properties?.FirstOrDefault(p => p.Name == "TabIndex")?.Value))
-			.Where(item => !string.IsNullOrEmpty(item.TabIndex))
-			.Select(item => (item.Name, item.X, item.Y, item.TabIndex!))
-			.ToArray();
-		dispatcher.BeginInvoke(() => surface.SetTabOrderBadges(badges));
-	}
+	/// <summary>Toggles the tab-order badges (drawn by the shared canvas from the tree's TabIndex
+	/// properties, which <c>DesignHost.BuildTree</c> populates per node).</summary>
+	public void SetTabOrderMode(bool show) => canvas.SetTabOrderMode(show);
 
 	#endregion
 
@@ -460,154 +421,25 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 
 	public event EventHandler<string> ElementPathPicked;
 
-	(string Name, string PickPath) ResolveNameAtWithPath(Vector2 point)
-	{
-		var design = surface.ToDesignPoint(new Point(point.X, point.Y));
-		if (client == null)
-		{
-			lastPickDiagnostic = "no design host";
-			return (null, null);
-		}
-		try
-		{
-			// Called from the pointer-pressed handler, i.e. ON the UI thread, so this wait freezes
-			// the whole IDE window - not just the design surface - for as long as it lasts. The
-			// transport's own limit is the 30s operation timeout, which is an eternity to sit on a
-			// click: an unresponsive child made the main window look hung. Give up quickly instead
-			// and treat it as "nothing picked"; the next click issues a fresh request.
-			var pending = client.HitTestAsync(Volatile.Read(ref version), design.X, design.Y);
-			if (!pending.Wait(TimeSpan.FromSeconds(2)))
-			{
-				lastPickDiagnostic = "hit-test did not answer within 2s";
-				return (null, null);
-			}
-			var result = pending.GetAwaiter().GetResult();
-			lastPickDiagnostic = $"point={design.X:F0},{design.Y:F0} chain=[{string.Join(",", result.Chain)}]"
-				+ $" pickPath={result.PickPath}";
-			// PickPath is the innermost element the DOCUMENT itself declares - the host skips
-			// control-template parts - so it, not the chain, is what the user aimed at. The chain
-			// is only consulted for a backend that reports no path at all, because its entries come
-			// from walking UP to the nearest NAMED ancestor: with a named page root (the usual
-			// case), scanning it first made every click on an unnamed element select that root.
-			if (result.Hit || !string.IsNullOrEmpty(result.PickPath))
-			{
-				var picked = FindNodeByPath(result.PickPath);
-				// Prefer the element's own name when it has one: selection, the Properties pad,
-				// the outline and multi-select are all keyed by name, and an already-named element
-				// needs none of the path handling.
-				return picked?.Name is { Length: > 0 } pickedName && selectableNames.Contains(pickedName)
-					? (pickedName, null)
-					: (null, result.PickPath);
-			}
-			foreach (var name in result.Chain)
-			{
-				if (selectableNames.Contains(name))
-				{
-					return (name, null);
-				}
-			}
-			return (null, null);
-		}
-		catch (Exception e)
-		{
-			lastPickDiagnostic = "hit-test failed: " + e.Message;
-			return (null, null);
-		}
-	}
-
-	/// <summary>The snapshot node whose own <see cref="ElementNode.Path"/> equals
-	/// <paramref name="path"/>, or null. Matches on the stored Path rather than re-deriving child
-	/// indices, because the host numbers a path by VISUAL child index while a node's Children list
-	/// holds only the UIElement ones - the two disagree wherever a non-UIElement child was skipped.
-	/// The document root's path is the empty string.</summary>
-	ElementNode FindNodeByPath(string path)
-	{
-		if (lastSnapshot?.Tree is not { } root || path == null)
-		{
-			return null;
-		}
-		return Find(root);
-
-		ElementNode Find(ElementNode node)
-		{
-			if (string.Equals(node.Path, path, StringComparison.Ordinal))
-			{
-				return node;
-			}
-			// Paths are built by appending to the parent's, so only a prefix can contain it.
-			if (path.Length != 0 && node.Path.Length != 0 && !path.StartsWith(node.Path + ",", StringComparison.Ordinal))
-			{
-				return null;
-			}
-			foreach (var child in node.Children)
-			{
-				if (Find(child) is { } found)
-				{
-					return found;
-				}
-			}
-			return null;
-		}
-	}
-
 	/// <summary>
-	/// The element at <paramref name="path"/> and its ancestors, ROOT FIRST, each as its tag name
-	/// plus that tag's occurrence index - the pair the shell maps back to the source document with
-	/// <c>FindNthSourceElement</c>. Template parts are left out entirely, so the occurrence index
-	/// counts the same elements the document does.
-	///
-	/// Both of those properties are corrections. The previous version re-derived the path by
-	/// comparing child indices while walking, keeping one `ancestors` buffer indexed by depth and
-	/// shared across sibling branches: any unrelated subtree whose child indices happened to match
-	/// the path prefix wrote into that buffer, which produced wrong chains and, once a branch was
-	/// shallower than the path, an IndexOutOfRangeException straight out of a mouse click. Matching
-	/// each node's own stored Path removes the guesswork. It also counted occurrences over every
-	/// visual node, template parts included, so the index handed to the source lookup was inflated
-	/// by however many same-tag elements the control templates happened to contribute.
+	/// IDesignCanvasBackend: the child's hit test at a design point. Called from the pointer-pressed
+	/// handler, i.e. ON the UI thread, so the wait freezes the whole IDE window for as long as it
+	/// lasts. The transport's own limit is the 30s operation timeout, which is an eternity to sit on
+	/// a click: an unresponsive child made the main window look hung. Give up quickly instead and
+	/// treat it as "nothing picked"; the next click issues a fresh request.
 	/// </summary>
-	public IReadOnlyList<(string Type, int TypeIndex, string Path)> GetPickChain(string path)
+	public DesignCanvasHit HitTest(double x, double y)
 	{
-		var result = new List<(string, int, string)>();
-		if (lastSnapshot?.Tree is not { } root || path == null)
-		{
-			return result;
-		}
-		// Pre-order == document order, and every ancestor is visited before the target, so the
-		// counts are complete for the whole chain by the time the target is reached.
-		var counts = new Dictionary<string, int>(StringComparer.Ordinal);
-		var ancestors = new List<(string Type, int TypeIndex, string Path)>();
-		Walk(root);
-		return result;
-
-		bool Walk(ElementNode node)
-		{
-			var counted = false;
-			if (node.IsDesignable && !string.IsNullOrEmpty(node.Type))
-			{
-				counts.TryGetValue(node.Type, out var seen);
-				counts[node.Type] = seen + 1;
-				ancestors.Add((node.Type, seen, node.Path));
-				counted = true;
-			}
-			if (string.Equals(node.Path, path, StringComparison.Ordinal))
-			{
-				result.AddRange(ancestors);
-				return true;
-			}
-			foreach (var child in node.Children)
-			{
-				if (Walk(child))
-				{
-					return true;
-				}
-			}
-			if (counted)
-			{
-				ancestors.RemoveAt(ancestors.Count - 1);
-			}
-			return false;
-		}
+		if (client == null)
+			return null;
+		var pending = client.HitTestAsync(Volatile.Read(ref version), x, y);
+		if (!pending.Wait(TimeSpan.FromSeconds(2)))
+			return null;
+		var result = pending.GetAwaiter().GetResult();
+		return new DesignCanvasHit(result.Hit, result.PickPath, result.Chain);
 	}
+
+	public IReadOnlyList<(string Type, int TypeIndex, string Path)> GetPickChain(string path) => canvas.GetPickChain(path);
 
 	#endregion
 
@@ -632,30 +464,11 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 	#region IWinUIXamlTextEditing
 
 	public event EventHandler<ElementDoubleClickInfo> ElementDoubleClicked;
-	void OnSurfaceElementDoubleClicked(object sender, Vector2 point)
-	{
-		var name = ResolveNameAt(point);
-		if (name == null || !nodesByName.TryGetValue(name, out var node))
-		{
-			ElementDoubleClicked?.Invoke(this, null);
-			return;
-		}
-		ElementDoubleClicked?.Invoke(this, new ElementDoubleClickInfo {
-			Name = name,
-			X = node.X,
-			Y = node.Y,
-			Width = node.Width,
-			Height = node.Height
-		});
-	}
 
 	public void BeginTextEdit(double x, double y, double width, double height, string text)
-		=> dispatcher.Invoke(() => surface.BeginTextEdit(x, y, width, height, text));
+		=> canvas.BeginTextEdit(x, y, width, height, text);
 
 	public event EventHandler<string> TextEditCommitted;
-
-	void OnSurfaceTextEditCommitted(object sender, string text)
-		=> TextEditCommitted?.Invoke(this, text);
 
 	#endregion
 
@@ -1093,16 +906,10 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 	public event EventHandler StateChanged;
 	public event EventHandler<string> ElementPicked;
 
-	public int ResolvedNameCount => nodesByName.Count;
-	public string LastPickDiagnostic => lastPickDiagnostic;
+	public int ResolvedNameCount => canvas.IndexedNameCount;
+	public string LastPickDiagnostic => canvas.LastPickDiagnostic;
 
-	public void SetSelectableNames(IReadOnlyList<string> names)
-	{
-		selectableNames.Clear();
-		if (names != null)
-			foreach (var name in names)
-				selectableNames.Add(name);
-	}
+	public void SetSelectableNames(IReadOnlyList<string> names) => canvas.SetSelectableNames(names);
 
 	public void LoadXaml(string text)
 	{
@@ -1558,24 +1365,9 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 	{
 		if (disposed || Volatile.Read(ref version) != requested)
 			return;
-		lastSnapshot = snapshot;
-		nodesByName = IndexTree(snapshot.Tree);
-		// Only snapshots that actually describe the document carry the groups. An early-return
-		// error snapshot (no Tree) has an empty list that means "nothing to say", not "this
-		// document has no states" - repopulating from one of those blanked the whole states panel
-		// the moment any state failed to apply.
-		if (snapshot.Tree != null || snapshot.VisualStateGroups.Count > 0)
-		{
-			surface.SetVisualStateGroups(snapshot.VisualStateGroups);
-		}
-			surface.SetComponentTray(snapshot.TrayComponents.Select(item => (item.Id, item.Name, item.Type)));
-		if (showTabOrder)
-			RefreshTabOrderBadges();
+		canvas.ApplySnapshot(snapshot);
 		if (snapshot.Render != null)
-		{
-			surface.SetRender(snapshot.Render);
 			HasRenderedPreview = true;
-		}
 		StatusText = snapshot.Diagnostics.Count == 0
 			? $"Rendered by {hostDisplayName} ({FormatSize(snapshot.Render)})."
 			: string.Join(Environment.NewLine, snapshot.Diagnostics.Select(d => d.Message));
@@ -1635,328 +1427,44 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 		return 0;
 	}
 
-	/// <summary>
-	/// Answers a click with the innermost named element that also exists in the source
-	/// document; a hit usually lands on a control-template part that has no x:Name.
-	/// </summary>
-	public string ResolveNameAt(Vector2 point) => ResolveNameAtWithPath(point).Name;
+	public string ResolveNameAt(Vector2 point) => canvas.ResolveNameAt(point);
 
-	void OnSurfacePointerPressed(object sender, (Vector2 Point, bool Ctrl) args)
-	{
-		var (name, pickPath) = ResolveNameAtWithPath(args.Point);
-		if (name != null)
-		{
-			ApplyPickSelection(name, args.Ctrl);
-		}
-		else if (!string.IsNullOrEmpty(pickPath))
-		{
-			ElementPathPicked?.Invoke(this, pickPath);
-		}
-	}
+	/// <summary>The primary (single) selection's element name.</summary>
+	public string SelectedElementName => canvas.SelectedElementName;
 
-	readonly List<string> multiSelectionNames = new();
-
-	/// <summary>The primary (single) selection's element name, kept in sync with the surface.</summary>
-	public string SelectedElementName { get; private set; }
-
-	/// <summary>Raised when the design-surface selection (possibly multiple elements) changes.</summary>
 	public event EventHandler<IReadOnlyList<string>> SelectionChanged;
 
-	/// <summary>The currently selected element names, primary first.</summary>
-	public IReadOnlyList<string> SelectedNames => multiSelectionNames.Count == 0 && SelectedElementName != null
-		? new[] { SelectedElementName }
-		: multiSelectionNames;
+	public IReadOnlyList<string> SelectedNames => canvas.SelectedNames;
 
-	/// <summary>Sets the multi-selection programmatically (e.g. from a scripted action);
-	/// the first name becomes the primary selection.</summary>
-	public void SelectElements(IReadOnlyList<string> names)
-	{
-		if (names == null)
-			return;
-		multiSelectionNames.Clear();
-		foreach (var name in names)
-		{
-			if (selectableNames.Contains(name) && !multiSelectionNames.Contains(name))
-				multiSelectionNames.Add(name);
-		}
-		if (multiSelectionNames.Count == 0)
-			return;
-		SelectElementInternal(multiSelectionNames[0]);
-	}
+	public void SelectElements(IReadOnlyList<string> names) => canvas.SelectElements(names);
 
-	void ApplyPickSelection(string name, bool ctrl)
-	{
-		if (!selectableNames.Contains(name))
-		{
-			return;
-		}
-		if (ctrl)
-		{
-			if (!multiSelectionNames.Remove(name))
-			{
-				multiSelectionNames.Add(name);
-			}
-			if (multiSelectionNames.Count == 0)
-			{
-				// Ctrl-clicked the last one away: nothing selected.
-				ClearSelectionInternal();
-				return;
-			}
-		}
-		else
-		{
-			multiSelectionNames.Clear();
-			multiSelectionNames.Add(name);
-		}
-		SelectElementInternal(name);
-	}
-
-	void ClearSelectionInternal()
-	{
-		multiSelectionNames.Clear();
-		surface.ClearSelection();
-		surface.SetSecondarySelection(Array.Empty<(string, double, double, double, double)>());
-		SelectedElementName = null;
-		SelectionChanged?.Invoke(this, Array.Empty<string>());
-	}
-
-	void SelectElementInternal(string name)
-	{
-		SelectedElementName = name;
-		RefreshSelectionOverlay();
-		SelectionChanged?.Invoke(this, multiSelectionNames.Count > 0 ? multiSelectionNames.ToArray() : new[] { name });
-	}
-
-	void RefreshSelectionOverlay()
-	{
-		var secondary = new List<(string, double, double, double, double)>();
-		foreach (var name in multiSelectionNames)
-		{
-			if (name != SelectedElementName && nodesByName.TryGetValue(name, out var node))
-			{
-				secondary.Add((name, node.X, node.Y, node.Width, node.Height));
-			}
-		}
-		surface.SetSecondarySelection(secondary);
-	}
-
-	string dragName;
-	string dragHandle;
-	(double X, double Y, double Width, double Height) dragStartRect;
-	// Multi-selection drag: the elements being dragged as a group (primary + secondaries).
-	List<string> dragGroup = new();
-	Dictionary<string, (double X, double Y, double Width, double Height)> dragGroupStart = new();
-	double dragDeltaX;
-	double dragDeltaY;
-
-	void OnSurfaceElementDragStarted(object sender, (string Name, string Handle) info)
-	{
-		dragName = info.Name;
-		dragHandle = info.Handle;
-		dragDeltaX = 0;
-		dragDeltaY = 0;
-		dragStartRect = nodesByName.TryGetValue(info.Name, out var node)
-			? (node.X, node.Y, node.Width, node.Height)
-			: surface.CurrentSelection;
-		// Dragging a multi-selected element moves the whole group; otherwise it is a
-		// plain single-element drag. Handle resizes stay single-element.
-		dragGroup = string.IsNullOrEmpty(dragHandle) && multiSelectionNames.Contains(info.Name)
-			? new List<string>(multiSelectionNames)
-			: new List<string> { info.Name };
-		dragGroupStart = new Dictionary<string, (double, double, double, double)>(StringComparer.Ordinal);
-		foreach (var name in dragGroup)
-		{
-			dragGroupStart[name] = nodesByName.TryGetValue(name, out var n)
-				? (n.X, n.Y, n.Width, n.Height)
-				: surface.CurrentSelection;
-		}
-		// Selecting the dragged element keeps the Properties pad and outline in sync.
-		ElementPicked?.Invoke(this, info.Name);
-	}
-
-	void OnSurfaceElementDragDelta(object sender, (double DX, double DY) delta)
-	{
-		if (dragName == null)
-			return;
-		var scale = surface.ViewportScale;
-		dragDeltaX = delta.DX / scale;
-		dragDeltaY = delta.DY / scale;
-		// Snap the primary element's edges/centre to nearby elements' edges/centres and
-		// show alignment guides while dragging (move only - resizes are not snapped).
-		var guides = (IReadOnlyList<(bool, double)>)Array.Empty<(bool, double)>();
-		if (string.IsNullOrEmpty(dragHandle))
-		{
-			(dragDeltaX, dragDeltaY, guides) = ApplySnap(dragDeltaX, dragDeltaY);
-		}
-		surface.SetSnapGuides(guides);
-		var rect = ApplyHandle(dragStartRect, dragDeltaX, dragDeltaY);
-		surface.ShowSelection(rect.X, rect.Y, rect.Width, rect.Height, dragName);
-		if (dragGroup.Count > 1)
-		{
-			// Move the secondary outlines with the group so the whole selection tracks.
-			var secondary = new List<(string, double, double, double, double)>();
-			foreach (var name in dragGroup)
-			{
-				if (name == dragName || !dragGroupStart.TryGetValue(name, out var start))
-					continue;
-				secondary.Add((name, start.X + dragDeltaX, start.Y + dragDeltaY, start.Width, start.Height));
-			}
-			surface.SetSecondarySelection(secondary);
-		}
-	}
-
-	/// <summary>
-	/// Snaps the dragged element's left/centre/right and top/middle/bottom lines to other
-	/// elements' matching lines (within the snap tolerance), returning the corrected delta
-	/// and the guide lines to draw.
-	/// </summary>
-	(double DX, double DY, IReadOnlyList<(bool IsVertical, double Position)> Guides) ApplySnap(double deltaX, double deltaY)
-	{
-		if (!dragGroupStart.TryGetValue(dragName, out var start))
-			return (deltaX, deltaY, Array.Empty<(bool, double)>());
-		var siblingBounds = nodesByName.Values
-			.Where(node => node.Name != dragName)
-			.Select(node => (node.X, node.Y, node.Width, node.Height));
-		return SnapGuideCalculator.ApplySnap(start, deltaX, deltaY, siblingBounds);
-	}
-
-	/// <summary>Raised when a group drag (multi-selection move) commits, with each element's delta.</summary>
 	public event EventHandler<IReadOnlyList<(string Name, double DX, double DY)>> ElementGroupDragCommitted;
 
-	void OnSurfaceElementDragCommitted(object sender, (double DX, double DY) delta)
-	{
-		if (dragName == null)
-			return;
-		// NOTE: dragDeltaX/dragDeltaY were already updated by the last OnSurfaceElementDragDelta,
-		// including any snap correction - do NOT recompute from the raw delta here, or the snap
-		// correction (and its alignment guides) would be lost on commit.
-		if (dragGroup.Count > 1)
-		{
-			var committed = new List<(string, double, double)>(dragGroup.Count);
-			foreach (var name in dragGroup)
-				committed.Add((name, dragDeltaX, dragDeltaY));
-			surface.SetSnapGuides(Array.Empty<(bool, double)>());
-			ElementGroupDragCommitted?.Invoke(this, committed);
-			dragName = null;
-			dragGroup = new();
-			dragGroupStart.Clear();
-			return;
-		}
-		var end = ApplyHandle(dragStartRect, dragDeltaX, dragDeltaY);
-		surface.SetSnapGuides(Array.Empty<(bool, double)>());
-		ElementDragCommitted?.Invoke(this, new ElementDragInfo {
-			Name = dragName,
-			StartX = dragStartRect.X,
-			StartY = dragStartRect.Y,
-			StartWidth = dragStartRect.Width,
-			StartHeight = dragStartRect.Height,
-			EndX = end.X,
-			EndY = end.Y,
-			EndWidth = end.Width,
-			EndHeight = end.Height
-		});
-		dragName = null;
-	}
-
-	/// <summary>Applies a move/resize delta to a design rect for the given handle, keeping
-	/// the result at least 1 unit wide/tall so a shrink-past-zero drag cannot crash the
-	/// selection outline (Rect rejects negative sizes).</summary>
-	(double X, double Y, double Width, double Height) ApplyHandle(
-		(double X, double Y, double Width, double Height) rect, double dx, double dy)
-	{
-		double width;
-		double height;
-		double rx;
-		double ry;
-		switch (dragHandle)
-		{
-			case "e": rx = rect.X; ry = rect.Y; width = rect.Width + dx; height = rect.Height; break;
-			case "s": rx = rect.X; ry = rect.Y; width = rect.Width; height = rect.Height + dy; break;
-			case "se": rx = rect.X; ry = rect.Y; width = rect.Width + dx; height = rect.Height + dy; break;
-			case "w": rx = rect.X + dx; ry = rect.Y; width = rect.Width - dx; height = rect.Height; break;
-			case "n": rx = rect.X; ry = rect.Y + dy; width = rect.Width; height = rect.Height - dy; break;
-			case "nw": rx = rect.X + dx; ry = rect.Y + dy; width = rect.Width - dx; height = rect.Height - dy; break;
-			case "sw": rx = rect.X + dx; ry = rect.Y; width = rect.Width - dx; height = rect.Height + dy; break;
-			case "ne": rx = rect.X; ry = rect.Y + dy; width = rect.Width + dx; height = rect.Height - dy; break;
-			default: return (rect.X + dx, rect.Y + dy, rect.Width, rect.Height);
-		}
-		if (width < 1) width = 1;
-		if (height < 1) height = 1;
-		return (rx, ry, width, height);
-	}
-
-	/// <summary>Raised with the committed drag: the element and its start/end design rect.</summary>
 	public event EventHandler<ElementDragInfo> ElementDragCommitted;
 
-	public (double X, double Y, double Width, double Height)? QueryElementBounds(string name)
-	{
-		if (string.IsNullOrEmpty(name) || !nodesByName.TryGetValue(name, out var node))
-			return null;
-		return (node.X, node.Y, node.Width, node.Height);
-	}
+	public (double X, double Y, double Width, double Height)? QueryElementBounds(string name) => canvas.QueryElementBounds(name);
 
-	/// <summary>Draws the selection outline over the named element's design bounds.</summary>
-	public void ShowSelection(string name)
-	{
-		if (string.IsNullOrEmpty(name) || !nodesByName.TryGetValue(name, out var node))
-		{
-			surface.ClearSelection();
-			return;
-		}
-		surface.ShowSelection(node.X, node.Y, node.Width, node.Height, name);
-	}
+	public void ShowSelection(string name) => canvas.ShowSelection(name);
 
-	/// <summary>Draws the selection outline over the element at <paramref name="path"/>. The
-	/// name-keyed overload above cannot serve an element the document never named, which is most
-	/// of a real page - see GetPickChain for why selection is path-keyed at all.</summary>
-	public void ShowSelectionAtPath(string path, string label)
-	{
-		if (FindNodeByPath(path) is not { } node)
-		{
-			surface.ClearSelection();
-			return;
-		}
-		SelectedElementName = null;
-		multiSelectionNames.Clear();
-		surface.ShowSelection(node.X, node.Y, node.Width, node.Height, label ?? node.Type ?? "");
-	}
+	public void ShowSelectionAtPath(string path, string label) => canvas.ShowSelectionAtPath(path, label);
 
-	/// <summary>Selects a single element (from outline/properties/actions), resetting any multi-selection.</summary>
-	public void SelectElement(string name)
-	{
-		if (string.IsNullOrEmpty(name) || !selectableNames.Contains(name))
-			return;
-		multiSelectionNames.Clear();
-		multiSelectionNames.Add(name);
-		SelectedElementName = name;
-		RefreshSelectionOverlay();
-		ShowSelection(name);
-		SelectionChanged?.Invoke(this, new[] { name });
-	}
-	public void ClearSelection() => surface.ClearSelection();
+	public void SelectElement(string name) => canvas.SelectElement(name);
+
+	public void ClearSelection() => canvas.ClearSelection();
 
 	#region IWinUIXamlDesignView
 
-	public (double Zoom, double PanX, double PanY) GetViewport() => surface.Viewport;
+	public (double Zoom, double PanX, double PanY) GetViewport() => canvas.GetViewport();
 
-	public double GetViewportScale() => surface.ViewportScale;
+	public double GetViewportScale() => canvas.GetViewportScale();
 
-	public void SetViewport(double zoom, double panX, double panY)
-		=> dispatcher.Invoke(() => surface.SetViewport(zoom, panX, panY));
+	public void SetViewport(double zoom, double panX, double panY) => canvas.SetViewport(zoom, panX, panY);
 
-	public void FitView() => dispatcher.Invoke(() => surface.FitView());
+	public void FitView() => canvas.FitView();
 
-	public (double X, double Y) DesignToSurfacePoint(double x, double y)
-	{
-		var point = dispatcher.Invoke(() => surface.DesignToSurfacePoint(x, y));
-		return (point.X, point.Y);
-	}
+	public (double X, double Y) DesignToSurfacePoint(double x, double y) => canvas.DesignToSurfacePoint(x, y);
 
-	public (double X, double Y) DesignToScreenPoint(double x, double y)
-	{
-		var point = dispatcher.Invoke(() => surface.SurfacePointToScreen(x, y));
-		return (point.X, point.Y);
-	}
+	public (double X, double Y) DesignToScreenPoint(double x, double y) => canvas.DesignToScreenPoint(x, y);
 
 	public (double Width, double Height)? GetDesignSize()
 	{
@@ -1993,12 +1501,7 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 
 	#endregion
 
-	public string DescribeElementState(string name)
-	{
-		if (string.IsNullOrEmpty(name) || !nodesByName.TryGetValue(name, out var node))
-			return "not found";
-		return $"type={node.Type} bounds=({node.X:F0},{node.Y:F0}) {node.Width:F0}x{node.Height:F0} children={node.Children.Count}";
-	}
+	public string DescribeElementState(string name) => canvas.DescribeElementState(name);
 
 	public string FrameProfile()
 	{
@@ -2011,27 +1514,11 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 	public string DumpDrawCalls() => "not applicable (out-of-process Uno host)";
 	public string WinUICommandProbe() => "not applicable (out-of-process Uno host)";
 
-	public string DiagnoseScreenAnchors() => dispatcher.Invoke(() => surface.DiagnoseScreenAnchors());
+	public string DiagnoseScreenAnchors() => canvas.DiagnoseScreenAnchors();
 	public string ImagePathProbe() => "not applicable (out-of-process Uno host)";
 	public void SetShowDiagnosticOverlay(bool value) { }
 	public void SetRecreateBitmapEachFrame(bool value) { }
 	public void SetPresentViaBackgroundBrush(bool value) { }
-
-	static Dictionary<string, ElementNode> IndexTree(ElementNode node)
-	{
-		var index = new Dictionary<string, ElementNode>(StringComparer.Ordinal);
-		if (node == null)
-			return index;
-		void Walk(ElementNode current)
-		{
-			if (current.Name != null)
-				index[current.Name] = current;
-			foreach (var child in current.Children)
-				Walk(child);
-		}
-		Walk(node);
-		return index;
-	}
 
 	public void Dispose()
 	{
@@ -2039,9 +1526,7 @@ sealed class UnoDesignRuntimeHost : IWinUIXamlRuntimeHost, IWinUIXamlSelectionOv
 			return;
 		disposed = true;
 		scaleTimer?.Stop();
-		surface.SurfacePointerPressed -= OnSurfacePointerPressed;
-		nodesByName.Clear();
-		lastSnapshot = null;
+		canvas.Dispose();
 		if (client != null) { client.Recovered -= OnClientRecovered; client.RecoveryFailed -= OnClientRecoveryFailed; }
 		client?.Dispose();
 		client = null;

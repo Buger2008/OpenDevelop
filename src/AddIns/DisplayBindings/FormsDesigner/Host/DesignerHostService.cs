@@ -147,7 +147,6 @@ sealed class DesignerHostService : IDesignerChildService
 				.ToArray();
 			selection.SetSelectedComponents(components, SelectionTypes.Replace);
 		}
-#if MICROSOFT_WINFORMS
 		// The chrome the selection just triggered is created asynchronously by the designers:
 		// ToolStripMenuItemDesigner's ShowDropDown()/PerformLayout() and the template node's
 		// visibility change only settle once the pending messages are pumped. Rendering in the
@@ -157,7 +156,6 @@ sealed class DesignerHostService : IDesignerChildService
 		Application.DoEvents();
 		(GetHost().RootComponent as Control)?.PerformLayout();
 		Application.DoEvents();
-#endif
 		return CurrentState(baseVersion);
 	}
 
@@ -176,7 +174,6 @@ sealed class DesignerHostService : IDesignerChildService
 		var host = GetHost();
 		if (host.Container.Components[elementId] is TabControl tabs && tabIndex >= 0 && tabIndex < tabs.TabPages.Count) {
 			tabs.SelectedIndex = tabIndex;
-#if MICROSOFT_WINFORMS
 			// Same reasoning as SetSelection's own note: TabControl's real OnSelectedIndexChanged
 			// (which flips the old/new TabPage's own Visible) is asynchronous relative to this
 			// call - rendering in the same call without pumping captured the frame BEFORE the
@@ -185,7 +182,6 @@ sealed class DesignerHostService : IDesignerChildService
 			Application.DoEvents();
 			(GetHost().RootComponent as Control)?.PerformLayout();
 			Application.DoEvents();
-#endif
 		}
 		return CurrentState(baseVersion);
 	}
@@ -201,7 +197,6 @@ sealed class DesignerHostService : IDesignerChildService
 	public DesignerSessionState HitTestPopupAndSelect(string sessionId, string documentId, long baseVersion, string ownerElementId, int x, int y)
 	{
 		EnsureCurrentVersion(sessionId, documentId, baseVersion, "select in");
-#if MICROSOFT_WINFORMS
 		var host = GetHost();
 		var rootControl = host.RootComponent as Control;
 		var dropDown = rootControl == null ? null
@@ -220,9 +215,6 @@ sealed class DesignerHostService : IDesignerChildService
 		var state = CurrentState(baseVersion);
 		state.PopupHitElementId = hit?.Site?.Name;
 		return state;
-#else
-		return CurrentState(baseVersion);
-#endif
 	}
 
 	[JsonRpcMethod("design/hit-test")]
@@ -565,7 +557,6 @@ sealed class DesignerHostService : IDesignerChildService
 		return CurrentState(baseVersion);
 	}
 
-#if MICROSOFT_WINFORMS
 	/// <summary>Generic smart-tag listing: works for any component with registered
 	/// DesignerActionLists (VS calls this the "smart tag" - the chevron button at a selected
 	/// component's top-right). LibreWinForms's portable fork has no
@@ -909,56 +900,7 @@ sealed class DesignerHostService : IDesignerChildService
 		root = root.ReplaceNode(declaration, declaration.WithMembers(declaration.Members.Add(field)));
 		file.Text = root.NormalizeWhitespace().ToFullString();
 	}
-#else
-	/// <summary>LibreWinForms has no System.ComponentModel.Design.DesignerActionService support
-	/// (verified: its portable fork does not implement the smart-tag/action-list design-time
-	/// services at all, only the base TypeDescriptor property/event model this file already uses
-	/// elsewhere), so the smart-tag and ToolStrip-item-insertion features are Microsoft-backend
-	/// only. Fail clearly rather than silently no-op.</summary>
-	[JsonRpcMethod("design/list-smart-tag-actions")]
-	public DesignerSmartTagActions ListSmartTagActions(string sessionId, string documentId, long baseVersion, string elementId)
-	{
-		EnsureCurrentVersion(sessionId, documentId, baseVersion, "list smart tag actions for");
-		return new DesignerSmartTagActions { Accepted = false, Error = "Smart tag actions are only supported by the Microsoft WinForms designer host." };
-	}
 
-	[JsonRpcMethod("design/invoke-smart-tag-method")]
-	public DesignerSessionState InvokeSmartTagMethod(string sessionId, string documentId, long baseVersion, string elementId, int listIndex, int itemIndex)
-	{
-		EnsureCurrentVersion(sessionId, documentId, baseVersion, "invoke smart tag method for");
-		throw new NotSupportedException("Smart tag actions are only supported by the Microsoft WinForms designer host.");
-	}
-
-	[JsonRpcMethod("design/add-toolstrip-item")]
-	public DesignerSessionState AddToolStripItem(string sessionId, string documentId, long baseVersion, string elementId, string itemTypeName, string parentItemId, string newItemId)
-	{
-		EnsureCurrentVersion(sessionId, documentId, baseVersion, "edit");
-		throw new NotSupportedException("ToolStrip item insertion is only supported by the Microsoft WinForms designer host.");
-	}
-
-	[JsonRpcMethod("design/list-verbs")]
-	public DesignerVerbs ListVerbs(string sessionId, string documentId, long baseVersion, string elementId)
-	{
-		EnsureCurrentVersion(sessionId, documentId, baseVersion, "list verbs for");
-		return new DesignerVerbs { Accepted = false, Error = "Designer verbs are only supported by the Microsoft WinForms designer host." };
-	}
-
-	[JsonRpcMethod("design/invoke-verb")]
-	public DesignerSessionState InvokeVerb(string sessionId, string documentId, long baseVersion, string elementId, int verbIndex)
-	{
-		EnsureCurrentVersion(sessionId, documentId, baseVersion, "invoke verb for");
-		throw new NotSupportedException("Designer verbs are only supported by the Microsoft WinForms designer host.");
-	}
-
-	[JsonRpcMethod("design/invoke-menu-command")]
-	public DesignerSessionState InvokeMenuCommand(string sessionId, string documentId, long baseVersion, string commandGuid, int commandId)
-	{
-		EnsureCurrentVersion(sessionId, documentId, baseVersion, "invoke menu command for");
-		throw new NotSupportedException("Designer menu commands are only supported by the Microsoft WinForms designer host.");
-	}
-#endif
-
-#if MICROSOFT_WINFORMS
 	/// <summary>Drag-to-reorder for a ToolStrip/StatusStrip/MenuStrip item: moves it to
 	/// <paramref name="targetIndex"/> within whatever collection it is CURRENTLY in (the strip's
 	/// own Items, or a submenu's DropDownItems - resolved from the item's own Owner/OwnerItem, the
@@ -1085,14 +1027,6 @@ sealed class DesignerHostService : IDesignerChildService
 		var wantOwner = String.IsNullOrEmpty(parentItemId) ? stripId : parentItemId;
 		return access.Name.Identifier.ValueText == wantMember && VbSimpleTargetName(access.Expression) == wantOwner;
 	}
-#else
-	[JsonRpcMethod("design/reorder-toolstrip-item")]
-	public DesignerSessionState ReorderToolStripItem(string sessionId, string documentId, long baseVersion, string elementId, int targetIndex)
-	{
-		EnsureCurrentVersion(sessionId, documentId, baseVersion, "edit");
-		throw new NotSupportedException("ToolStrip item reordering is only supported by the Microsoft WinForms designer host.");
-	}
-#endif
 
 	static int Snap(int value) => (int)Math.Round(value / 8d, MidpointRounding.AwayFromZero) * 8;
 
@@ -1145,7 +1079,6 @@ sealed class DesignerHostService : IDesignerChildService
 		}
 		if (!control.ClientRectangle.Contains(point))
 			return null;
-#if MICROSOFT_WINFORMS
 		// A click on a real ToolStrip/MenuStrip/StatusStrip should select the item under the
 		// pointer directly, the same way clicking a plain Control does - point is already in
 		// this control's own client space by the time we get here, which is the same space
@@ -1158,7 +1091,6 @@ sealed class DesignerHostService : IDesignerChildService
 					return item;
 			}
 		}
-#endif
 		return control;
 	}
 
@@ -1173,14 +1105,11 @@ sealed class DesignerHostService : IDesignerChildService
 
 	void DisposeDesignSurface()
 	{
-#if MICROSOFT_WINFORMS
 		if (designSurface?.GetService(typeof(IMenuCommandService)) is DesignerMenuCommandService commands)
 			commands.DisposingSurface = true;
-#endif
 		designSurface?.Dispose();
 	}
 
-#if MICROSOFT_WINFORMS
 	sealed class DesignerMenuCommandService(IServiceProvider provider) : MenuCommandService(provider)
 	{
 		public bool DisposingSurface { get; set; }
@@ -1193,7 +1122,6 @@ sealed class DesignerHostService : IDesignerChildService
 			base.RemoveCommand(command);
 		}
 	}
-#endif
 
 	internal void Close()
 	{
@@ -1864,8 +1792,69 @@ sealed class DesignerHostService : IDesignerChildService
 #endif
 #if !MICROSOFT_WINFORMS
 		AdoptVisibleShadowsFromLoadedSource();
+		HidePortableNativeWindows();
 #endif
 	}
+
+#if !MICROSOFT_WINFORMS
+	/// <summary>
+	/// The design root is constructed as an ordinary top-level Form and only made a child by its
+	/// designer afterwards, and the portable (ProGPU) backend keeps the native window that first
+	/// handle created - so off Windows every loaded document put a real "Form1" window, with its own
+	/// menu bar, beside the IDE. The design host only ever needs rendered bitmaps, so its unowned
+	/// top-level windows stay hidden (owned popups - open menu dropdowns - are left alone).
+	/// Reflection because the backend exposes no headless switch: <c>LibrePlatform.Current.Windows</c>
+	/// is the ProGPU <c>SilkWindowService</c>, which tracks its windows in <c>_windows</c>.
+	/// </summary>
+	static void HidePortableNativeWindows()
+	{
+		MakeBackgroundApplication();
+		try {
+			var platform = Type.GetType("LibreWinForms.Platform.LibrePlatform, System.Windows.Forms")
+				?? AppDomain.CurrentDomain.GetAssemblies().Select(a => a.GetType("LibreWinForms.Platform.LibrePlatform")).FirstOrDefault(t => t != null);
+			var windowService = (platform?.GetProperty("Current")?.GetValue(null))?.GetType().GetProperty("Windows")?.GetValue(platform!.GetProperty("Current")!.GetValue(null));
+			if (windowService?.GetType().GetField("_windows", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(windowService) is not System.Collections.IEnumerable windows)
+				return;
+			foreach (var window in windows.Cast<object>().ToArray()) {
+				var type = window.GetType();
+				// Only unowned top-level windows: a menu dropdown is an owned popup window, and
+				// hiding it closes the dropdown the designer is holding open for editing.
+				var owner = type.GetProperty("Owner")?.GetValue(window);
+				if (owner != null && !owner.Equals(Activator.CreateInstance(owner.GetType())))
+					continue;
+				if (type.GetProperty("Visible")?.GetValue(window) is true)
+					type.GetMethod("Hide", Type.EmptyTypes)?.Invoke(window, null);
+			}
+		} catch (Exception exception) {
+			Trace("HidePortableNativeWindows failed: " + exception.Message);
+		}
+	}
+
+	/// <summary>macOS: the windowing backend makes the process a regular (Dock icon + menu bar)
+	/// application when it creates a window. The design host is a background service of the IDE:
+	/// NSApplicationActivationPolicyAccessory keeps it out of the Dock and the app switcher.</summary>
+	static void MakeBackgroundApplication()
+	{
+		if (!OperatingSystem.IsMacOS())
+			return;
+		try {
+			var app = objc_msgSend(objc_getClass("NSApplication"), sel_registerName("sharedApplication"));
+			if (app != IntPtr.Zero)
+				objc_msgSend_long(app, sel_registerName("setActivationPolicy:"), 1 /* Accessory */);
+		} catch (Exception exception) {
+			Trace("MakeBackgroundApplication failed: " + exception.Message);
+		}
+	}
+
+	[System.Runtime.InteropServices.DllImport("/usr/lib/libobjc.dylib")]
+	static extern IntPtr objc_getClass(string name);
+	[System.Runtime.InteropServices.DllImport("/usr/lib/libobjc.dylib")]
+	static extern IntPtr sel_registerName(string name);
+	[System.Runtime.InteropServices.DllImport("/usr/lib/libobjc.dylib", EntryPoint = "objc_msgSend")]
+	static extern IntPtr objc_msgSend(IntPtr receiver, IntPtr selector);
+	[System.Runtime.InteropServices.DllImport("/usr/lib/libobjc.dylib", EntryPoint = "objc_msgSend")]
+	static extern bool objc_msgSend_long(IntPtr receiver, IntPtr selector, long value);
+#endif
 
 #if MICROSOFT_WINFORMS
 	/// <summary>Keeps the installed command set alive for the lifetime of the surface: CommandSet
@@ -2047,17 +2036,9 @@ sealed class DesignerHostService : IDesignerChildService
 			Name = component.Site?.Name ?? "",
 			Type = component.GetType().FullName ?? component.GetType().Name,
 			Parent = component is Control control ? control.Parent?.Site?.Name ?? ""
-#if MICROSOFT_WINFORMS
 				: component is ToolStripItem toolStripItem ? ToolStripItemParentName(toolStripItem) : "",
-#else
-				: "",
-#endif
 			Text = component is Control textControl ? textControl.Text ?? ""
-#if MICROSOFT_WINFORMS
 				: component is ToolStripItem textItem ? textItem.Text ?? "" : "",
-#else
-				: "",
-#endif
 			AccessibleName = PropertyText(component, "AccessibleName") is { Length: > 0 } accessibleName
 				? accessibleName : component is Control namedControl && !String.IsNullOrEmpty(namedControl.Text)
 					? namedControl.Text : component.Site?.Name ?? "",
@@ -2066,45 +2047,26 @@ sealed class DesignerHostService : IDesignerChildService
 				&& accessibleRole != "Default"
 				? accessibleRole : component.GetType().Name,
 			X = component is Control boundsControl ? boundsControl.Left
-#if MICROSOFT_WINFORMS
 				: component is ToolStripItem boundsItem ? boundsItem.Bounds.X : 0,
-#else
-				: 0,
-#endif
 			Y = component is Control boundsControl2 ? boundsControl2.Top
-#if MICROSOFT_WINFORMS
 				: component is ToolStripItem boundsItem2 ? boundsItem2.Bounds.Y : 0,
-#else
-				: 0,
-#endif
 			SurfaceX = component is Control surfaceControl ? SurfaceLocation(surfaceControl).X
-#if MICROSOFT_WINFORMS
 				: component is ToolStripItem surfaceItem && surfaceItem.Owner != null
 					? SurfaceLocation(surfaceItem.Owner).X + surfaceItem.Bounds.X : 0,
-#else
-				: 0,
-#endif
 			SurfaceY = component is Control surfaceControl2 ? SurfaceLocation(surfaceControl2).Y
-#if MICROSOFT_WINFORMS
 				: component is ToolStripItem surfaceItem2 && surfaceItem2.Owner != null
 					? SurfaceLocation(surfaceItem2.Owner).Y + surfaceItem2.Bounds.Y : 0,
-#else
-				: 0,
-#endif
 			Width = component == host.RootComponent && rootDesignSize.HasValue
 #if MICROSOFT_WINFORMS
 				? (component as Control)?.Width ?? rootDesignSize.Value.Width
-				: component is Control sizeControl ? sizeControl.Width
-				: component is ToolStripItem sizeItem ? sizeItem.Bounds.Width : 0,
 #else
 				? rootDesignSize.Value.Width
-				: component is Control sizeControl ? sizeControl.Width : 0,
 #endif
+				: component is Control sizeControl ? sizeControl.Width
+				: component is ToolStripItem sizeItem ? sizeItem.Bounds.Width : 0,
 			Height = component == host.RootComponent && rootDesignSize.HasValue
 #if MICROSOFT_WINFORMS
 				? (component as Control)?.Height ?? rootDesignSize.Value.Height
-				: component is Control sizeControl2 ? sizeControl2.Height
-				: component is ToolStripItem sizeItem2 ? sizeItem2.Bounds.Height : 0,
 #else
 				// The Microsoft branch above reports the root's OUTER height (Form.Height already
 				// covers the native caption/border). The portable host has no non-client frame, so
@@ -2112,15 +2074,14 @@ sealed class DesignerHostService : IDesignerChildService
 				// otherwise the root's selection rectangle stops at the client area and no longer
 				// covers the frame that was actually rendered.
 				? rootDesignSize.Value.Height + (component is Form ? PortableFormTitleBarHeight : 0)
-				: component is Control sizeControl2 ? sizeControl2.Height : 0,
 #endif
+				: component is Control sizeControl2 ? sizeControl2.Height
+				: component is ToolStripItem sizeItem2 ? sizeItem2.Bounds.Height : 0,
 			IsTrayComponent = IsTrayComponent(component),
 			IsVisible = IsEffectivelyVisible(component),
 			IsControl = component is Control,
-#if MICROSOFT_WINFORMS
 			IsDropDownItem = component is ToolStripItem { OwnerItem: not null },
 			ItemInsertionBounds = component is ToolStrip insertionStrip ? FindTemplateNodeBounds(insertionStrip) : null,
-#endif
 			ItemInsertionStyle = ItemInsertionStyle(component),
 			NewItemTypeNames = NewItemTypeNames(component),
 			Properties = properties,
@@ -2145,9 +2106,7 @@ sealed class DesignerHostService : IDesignerChildService
 			Components = components,
 			TrayComponents = components.Where(component => component.IsTrayComponent)
 				.Select(component => new DesignerTrayItem { Id = component.Name, Name = component.Name, Type = component.Type }).ToList(),
-#if MICROSOFT_WINFORMS
 			Popups = rootControl == null ? [] : CapturePopupFrames(rootControl)
-#endif
 		};
 	}
 
@@ -2158,7 +2117,6 @@ sealed class DesignerHostService : IDesignerChildService
 	/// a strip gets None.</summary>
 	static string ItemInsertionStyle(IComponent component)
 	{
-#if MICROSOFT_WINFORMS
 		// A ToolStripDropDownItem (a menu item with its own submenu, like "File") is not itself a
 		// MenuStrip/ToolStripDropDown, but ToolStripDesignerUtils.GetToolStripFromComponent
 		// resolves ITS "ToolStrip" as item.DropDown - so it gets the same TypeHere style as the
@@ -2167,7 +2125,6 @@ sealed class DesignerHostService : IDesignerChildService
 			return DesignerItemInsertionStyles.TypeHere;
 		if (component is ToolStrip)
 			return DesignerItemInsertionStyles.SplitButton;
-#endif
 		return DesignerItemInsertionStyles.None;
 	}
 
@@ -2178,7 +2135,6 @@ sealed class DesignerHostService : IDesignerChildService
 	/// backends and the client agree on one list.</summary>
 	static List<string> NewItemTypeNames(IComponent component)
 	{
-#if MICROSOFT_WINFORMS
 		const string ns = "System.Windows.Forms.";
 		if (component is MenuStrip)
 			return [ns + "ToolStripMenuItem", ns + "ToolStripComboBox", ns + "ToolStripTextBox"];
@@ -2193,7 +2149,6 @@ sealed class DesignerHostService : IDesignerChildService
 			return [ns + "ToolStripButton", ns + "ToolStripLabel", ns + "ToolStripSplitButton",
 				ns + "ToolStripDropDownButton", ns + "ToolStripSeparator", ns + "ToolStripComboBox",
 				ns + "ToolStripTextBox", ns + "ToolStripProgressBar"];
-#endif
 		return [];
 	}
 
@@ -2266,23 +2221,15 @@ sealed class DesignerHostService : IDesignerChildService
 				return false;
 			if (!TypeDescriptor.GetAttributes(component).Contains(DesignTimeVisibleAttribute.Yes))
 				return false;
-#if MICROSOFT_WINFORMS
 			var designerType = DeclaredDesignerType(component.GetType());
 			if (IsToolStripDesigner(designerType)) return true;
 			if (!IsControlDesigner(designerType)) return true;
 			return component is Form { TopLevel: true };
-#else
-			// The portable LibreWinForms fork does not ship the System.Windows.Forms.Design
-			// designer types these attributes name, so the designer-kind clauses cannot be
-			// evaluated there; only the "not a Control at all" case can be honored.
-			return component is not Control;
-#endif
 		} catch {
 			return false;
 		}
 	}
 
-#if MICROSOFT_WINFORMS
 	/// <summary>The type named by the component type's DesignerAttribute registered against the
 	/// IDesigner base type, or NULL when it declares none / it cannot be loaded - the same lookup
 	/// ComponentTray.GetDesignerType performs.</summary>
@@ -2310,7 +2257,6 @@ sealed class DesignerHostService : IDesignerChildService
 		}
 		return false;
 	}
-#endif
 
 	static string PropertyText(IComponent component, string propertyName)
 	{
@@ -2343,7 +2289,6 @@ sealed class DesignerHostService : IDesignerChildService
 		var children = control.Controls.Cast<Control>()
 			.Where(child => container == null || container.Components.Cast<IComponent>().Contains(child))
 			.Select((child, index) => BuildElementTree(child, ChildPath(path, index), container));
-#if MICROSOFT_WINFORMS
 		// The portable LibreWinForms ToolStripItem does not expose Bounds/Owner/OwnerItem or
 		// ToolStripDropDownItem at all, so this walk only exists for the real Microsoft backend.
 		if (control is ToolStrip toolStrip) {
@@ -2352,7 +2297,6 @@ sealed class DesignerHostService : IDesignerChildService
 				.Where(item => container == null || container.Components.Cast<IComponent>().Contains(item))
 				.Select((item, index) => BuildToolStripItemNode(item, ChildPath(path, offset + index), container)));
 		}
-#endif
 		return new DesignerElementNode {
 			Id = control.Site?.Name ?? control.GetType().Name,
 			Name = control.Site?.Name,
@@ -2370,7 +2314,6 @@ sealed class DesignerHostService : IDesignerChildService
 	static string ChildPath(string path, int index) =>
 		path.Length == 0 ? index.ToString(CultureInfo.InvariantCulture) : path + "," + index.ToString(CultureInfo.InvariantCulture);
 
-#if MICROSOFT_WINFORMS
 	/// <summary>A ToolStripDropDownItem's own children (a menu item's submenu) live in
 	/// DropDownItems, not Items - only ToolStrip/MenuStrip/StatusStrip themselves use Items.
 	/// Same container-membership filtering as BuildElementTree: a submenu can carry the same
@@ -2396,7 +2339,6 @@ sealed class DesignerHostService : IDesignerChildService
 			Children = children
 		};
 	}
-#endif
 
 	/// <summary>Parses the current designer file once and indexes every "target.Event" (or bare
 	/// root-shorthand "Event") handler assignment it contains, so <see cref="DescribeEvents"/>
@@ -2531,13 +2473,11 @@ sealed class DesignerHostService : IDesignerChildService
 	/// The old loop therefore folded that frame offset into every component, putting the reported
 	/// coordinates 15px off from the very bitmap and hit-test results they are meant to line up
 	/// with.</summary>
-#if MICROSOFT_WINFORMS
 	/// <summary>A ToolStripItem's logical parent for the Properties Pad / flat component list:
 	/// a submenu item's parent is the ToolStripDropDownItem that owns its dropdown (OwnerItem);
 	/// a top-level item's parent is the ToolStrip/MenuStrip/StatusStrip itself (Owner).</summary>
 	static string ToolStripItemParentName(ToolStripItem item) =>
 		item.OwnerItem?.Site?.Name ?? item.Owner?.Site?.Name ?? "";
-#endif
 
 	Point SurfaceLocation(Control control)
 	{
@@ -2594,7 +2534,6 @@ sealed class DesignerHostService : IDesignerChildService
 	List<DesignerRectangle> FindTabHeaderBounds(IComponent component)
 	{
 		var result = new List<DesignerRectangle>();
-#if MICROSOFT_WINFORMS
 		if (component is not TabControl tabs) return result;
 		try {
 			var origin = SurfaceLocation(tabs);
@@ -2605,14 +2544,12 @@ sealed class DesignerHostService : IDesignerChildService
 		} catch (Exception exception) {
 			Trace("FindTabHeaderBounds failed: " + exception.Message);
 		}
-#endif
 		// LibreWinForms does not implement TabControl.TabCount/GetTabRect, so tab-header hit-
 		// testing (and therefore click-to-switch-tab) is Microsoft-backend only for now - the
 		// client falls back to its existing generic hit-test when this list is empty.
 		return result;
 	}
 
-#if MICROSOFT_WINFORMS
 	/// <summary>Captures every menu dropdown the designer currently has expanded as ITS OWN
 	/// bitmap/frame, rather than compositing them into the root frame.
 	///
@@ -2766,7 +2703,6 @@ sealed class DesignerHostService : IDesignerChildService
 		return restore;
 	}
 
-#endif
 
 	/// <summary>Height of the simulated title bar <see cref="PaintFormChrome"/> overlays on a
 	/// portable-host Form render, since LibreWinForms's Form.Size is client-only (no real HWND,
@@ -2803,6 +2739,9 @@ sealed class DesignerHostService : IDesignerChildService
 		if (root.Width <= 0 || root.Height <= 0) root.Size = new Size(300, 200);
 		Trace("Render creating root control");
 		root.CreateControl();
+#if !MICROSOFT_WINFORMS
+		HidePortableNativeWindows();
+#endif
 		Trace("Render laying out root control");
 		root.PerformLayout();
 		var renderSize = designSize ?? root.Size;

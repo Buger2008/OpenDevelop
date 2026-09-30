@@ -72,6 +72,14 @@ namespace ICSharpCode.FormsDesigner.DevFlow
 			return JsonSerializer.Serialize(DesignerSurfaceGeometryProbe.ToJson(g));
 		}
 
+		[DevFlowAction("od.forms-designer.view", Description = "Set the design surface view: \"fit\", or an absolute zoom (1 = 100%) snapped to the toolbar's presets - mirrors od.winui-designer.view")]
+		public static string SetView(string value)
+		{
+			if (FindFormsDesignerViewContent()?.RemoteDesignSurface is not RemoteFormsDesignerControl surface)
+				return Failure("The out-of-process WinForms designer is not loaded");
+			return JsonSerializer.Serialize(new { success = true, zoom = surface.SetZoom(value) });
+		}
+
 		[DevFlowAction("od.forms-designer.item-editor-status", Description = "Inspect the inline item editor's selection, visibility, focus and text without changing the designer")]
 		public static string GetItemEditorStatus()
 		{
@@ -199,6 +207,9 @@ namespace ICSharpCode.FormsDesigner.DevFlow
 				designerLoaded = true,
 				outOfProcess = true,
 				backend = viewContent.BackendName,
+				// Why the last canvas click picked what it did (the shared canvas's own diagnostic).
+				lastPick = (viewContent.RemoteDesignSurface as RemoteFormsDesignerControl)?.LastPickDiagnostic,
+				selectedComponent = (viewContent.RemoteDesignSurface as RemoteFormsDesignerControl)?.SelectedComponentName,
 				usesCodeDomLoader = false,
 				loaderType = "ICSharpCode.FormsDesigner.Host.SnapshotRoslynDesignerLoader",
 				hostProcessId = viewContent.RemoteDesignerProcessId,

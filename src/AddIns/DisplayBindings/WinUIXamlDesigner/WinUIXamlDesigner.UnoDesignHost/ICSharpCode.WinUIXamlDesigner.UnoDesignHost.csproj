@@ -10,9 +10,16 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\DesignerCanvas\ICSharpCode.DesignerCanvas.csproj" Private="false" />
     <ProjectReference Include="..\WinUIXamlDesigner.AddIn\ICSharpCode.WinUIXamlDesigner.csproj" Private="false" />
     <ProjectReference Include="..\..\..\..\Main\Designer\Designer.Remote\Designer.Remote.csproj" />
-    <ProjectReference Include="..\..\..\..\Main\Designer\Designer.Presentation\Designer.Presentation.csproj" />
+    <ProjectReference Include="..\..\..\..\Main\Designer\Designer.Presentation\Designer.Presentation.csproj" Private="false" />
     <PackageReference Include="StreamJsonRpc" />
   </ItemGroup>
+  <!-- ICSharpCode.Designer.Presentation.dll comes from the ICSharpCode.DesignerCanvas addin (see
+       WinUIXamlDesigner.addin). Private="false" stops only the direct reference; a transitive one
+       still copies it here, and a second copy gives the canvas's types two identities. -->
+  <Target Name="DropPrivateDesignerPresentationCopy" AfterTargets="Build">
+    <Delete Files="$(OutDir)ICSharpCode.Designer.Presentation.dll;$(OutDir)ICSharpCode.Designer.Presentation.pdb" />
+  </Target>
 </Project>

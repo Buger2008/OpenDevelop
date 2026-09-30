@@ -166,9 +166,12 @@ public static class GtkDesignerDevFlowActions
 	{
 		var view = Activate();
 		if (view == null) return JsonSerializer.Serialize(new { success = false, error = "GTK designer is not loaded" });
-		var target = view.FindNativeTarget(id);
-		if (target == null) return JsonSerializer.Serialize(new { success = false, error = "No rendered native target for: " + id });
-		return JsonSerializer.Serialize(GetScreenBounds(target));
+		if (view.ScreenBoundsOf(id) is not { } bounds) return JsonSerializer.Serialize(new { success = false, error = "No rendered native target for: " + id });
+		return JsonSerializer.Serialize(new {
+			success = true,
+			x = bounds.X, y = bounds.Y, width = bounds.Width, height = bounds.Height,
+			centerX = bounds.X + bounds.Width / 2, centerY = bounds.Y + bounds.Height / 2
+		});
 	}
 
 	static ListBoxItem? FindRealizedContainer(ItemsControl itemsControl, object item)

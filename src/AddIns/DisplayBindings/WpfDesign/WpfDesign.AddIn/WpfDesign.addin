@@ -5,8 +5,11 @@
        addInManagerHidden="preinstalled">
 	<Manifest>
 		<Identity name="ICSharpCode.WpfDesigner" />
+		<Dependency addin="ICSharpCode.DesignerCanvas" requirePreload="true" />
 	</Manifest>
 	<Runtime>
+		<Import assembly="$ICSharpCode.DesignerCanvas/ICSharpCode.DesignerCanvas.dll" />
+		<Import assembly="$ICSharpCode.DesignerCanvas/ICSharpCode.Designer.Presentation.dll" />
 		<Import assembly="ICSharpCode.WpfDesign.AddIn.dll">
 			<ConditionEvaluator name="IsCutCopyEnabled" class="ICSharpCode.WpfDesign.AddIn.Commands.IsCutCopyEnabled" />
 			<ConditionEvaluator name="IsPasteEnabled" class="ICSharpCode.WpfDesign.AddIn.Commands.IsPasteEnabled" />
@@ -18,6 +21,9 @@
 			<ConditionEvaluator name="IsOutlineOpen" class="ICSharpCode.WpfDesign.AddIn.Commands.IsOutlineOpen" />
 		</Import>
 	</Runtime>
+	<Path name="/SharpDevelop/Autostart">
+		<Class id="ICSharpCode.WpfDesign.AddIn.RegisterXamlLanguageServersCommand" class="ICSharpCode.WpfDesign.AddIn.RegisterXamlLanguageServersCommand" />
+	</Path>
 	<Path name="/SharpDevelop/Workbench/DisplayBindings">
 		<!--<DisplayBinding id    = "WPFDesigner"
 		                class = "ICSharpCode.WpfDesign.AddIn.WpfPrimaryDisplayBinding"
