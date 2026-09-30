@@ -1286,6 +1286,65 @@ public sealed class AddInTests : IAsyncDisposable
     }
 
     /// <summary>
+    /// A ProGPU WinUI project is designed by ProGPU on the shared design canvas
+    /// (ICSharpCode.DesignerCanvas addin), like every other backend. Before, a UseProGpuWinUI project
+    /// was taken for Uno and rendered by the Uno host ("Rendered by Uno design host"); and ProGPU's
+    /// own host was a bare bitmap control with no toolbar, zoom, selection or handles. This checks the
+    /// canvas's behaviour on ProGPU's frames: selection outline on the element's bounds, absolute
+    /// zoom and Fit, the default page colour, and a theme switch that re-renders.
+    /// </summary>
+    [Fact]
+    public async Task ProGpuWinUIDesigner_UsesTheSharedDesignCanvas()
+    {
+        var pagePath = Path.Combine(Path.GetDirectoryName(_app.ProGpuWinUISampleSolutionPath)!, "MainPage.xaml");
+        Assert.True((await _app.ReopenSolutionAsync(_app.ProGpuWinUISampleSolutionPath)).GetProperty("success").GetBoolean());
+        Assert.True((await _app.InvokeAsync("od.open-file", pagePath)).GetProperty("opened").GetBoolean());
+        await _app.InvokeAsync("od.winui-designer.activate-design");
+
+        JsonElement status = default;
+        var rendered = await OpenDevelopAppFixture.PollUntilAsync(async () =>
+        {
+            status = await _app.InvokeAsync("od.winui-designer.status");
+            return status.TryGetProperty("rendered", out var r) && r.GetBoolean();
+        }, TimeSpan.FromSeconds(60));
+        Assert.True(rendered, status.ToString());
+        Assert.Equal("ProGPU", status.GetProperty("backend").GetString());
+        Assert.StartsWith("Rendered by ProGPU WinUI", status.GetProperty("status").GetString());
+
+        // Selection: the canvas outlines the element's own bounds from ProGPU's design tree.
+        Assert.True((await _app.InvokeAsync("od.winui-designer.select", "PrimaryButton")).GetProperty("success").GetBoolean());
+        var geometry = await _app.InvokeAsync("od.winui-designer.surface-geometry");
+        Assert.True(geometry.GetProperty("available").GetBoolean(), geometry.ToString());
+        var selection = geometry.GetProperty("selection");
+        var element = geometry.GetProperty("element");
+        foreach (var edge in new[] { "x", "y", "width", "height" })
+            Assert.Equal(element.GetProperty(edge).GetDouble(), selection.GetProperty(edge).GetDouble(), 1);
+        Assert.True(selection.GetProperty("height").GetDouble() > 0, geometry.ToString());
+
+        // Zoom: absolute 100% shows the design at its own size; Fit scales it to the pane.
+        Assert.True((await _app.InvokeAsync("od.winui-designer.view", "1 0 0")).GetProperty("success").GetBoolean());
+        var atHundred = await _app.InvokeAsync("od.winui-designer.surface-geometry");
+        var fit = await _app.InvokeAsync("od.winui-designer.view", "fit");
+        Assert.True(fit.GetProperty("success").GetBoolean(), fit.ToString());
+        var atFit = await _app.InvokeAsync("od.winui-designer.surface-geometry");
+        Assert.Equal(1280, atHundred.GetProperty("frame").GetProperty("width").GetDouble(), 1);
+        Assert.NotEqual(atHundred.GetProperty("frame").GetProperty("width").GetDouble(), atFit.GetProperty("frame").GetProperty("width").GetDouble());
+
+        // Page colour and theme: a page without a Background shows as an app window would.
+        await _app.InvokeAsync("od.winui-designer.theme", "Light");
+        var white = await OpenDevelopAppFixture.PollUntilAsync(async () =>
+            (await _app.InvokeAsync("od.winui-designer.render-sample")).GetProperty("sample").GetString()?.Contains("center=#FFFFFF") == true,
+            TimeSpan.FromSeconds(20));
+        Assert.True(white, "Light theme should show a white page");
+        await _app.InvokeAsync("od.winui-designer.theme", "Dark");
+        var dark = await OpenDevelopAppFixture.PollUntilAsync(async () =>
+            (await _app.InvokeAsync("od.winui-designer.render-sample")).GetProperty("sample").GetString()?.Contains("center=#1C1C1E") == true,
+            TimeSpan.FromSeconds(20));
+        await _app.InvokeAsync("od.winui-designer.theme", "Light");
+        Assert.True(dark, "Dark theme should re-render the page dark");
+    }
+
+    /// <summary>
     /// Theme switching must re-resolve ThemeResource against the new theme and actually change
     /// the rendered pixels: UnoXamlSample's App.xaml maps PageBackgroundBrush to #EEEEEE (Light)
     /// and #222222 (Dark), so the sampled bitmap center must flip between the two.
@@ -2320,7 +2379,7 @@ public sealed class AddInTests : IAsyncDisposable
         Assert.Equal("vector", padIcons[rootRow]);
     }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
+    [Fact] // WpfSampleSolutionPath is the LibreWPF sample off Windows.
     [Trait("DesignerBackend", "Microsoft")]
     public async Task OpenSamplePaneXaml_LoadsDesignerWithNestedControlTree()
     {
@@ -2353,7 +2412,57 @@ public sealed class AddInTests : IAsyncDisposable
         Assert.Contains("PaneListItemTwo", outlineNames);
     }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
+    [Fact]
+    public async Task LibreWpf_PropertiesPadEditAndSave_ChangesOnlyTheEditedAttribute()
+    {
+        // LibreWPF counterpart of SelectControl_EditingContentInPropertiesPad_UpdatesAndSavesXaml,
+        // which only runs on Windows. The saved file must differ from the original by exactly the
+        // edited value: no reformatted start tags, no App.xaml resources spliced into the page, no
+        // rewritten pack URIs (the child host used to save its preview-only transformed text back).
+        var solutionPath = _app.LibreWpfSampleSolutionPath;
+        var xamlPath = Path.Combine(Path.GetDirectoryName(solutionPath)!, "MainWindow.xaml");
+        var originalXaml = await File.ReadAllTextAsync(xamlPath);
+        Assert.Contains("Content=\"Button\"", originalXaml);
+
+        try
+        {
+            var openSolutionResult = await _app.ReopenSolutionAsync(solutionPath);
+            Assert.True(openSolutionResult.GetProperty("success").GetBoolean());
+            var openFileResult = await _app.InvokeAsync("od.open-file", xamlPath);
+            Assert.True(openFileResult.GetProperty("opened").GetBoolean());
+            var status = await WaitForWpfDesignerStatusAsync(expectedRootItemType: "Window", timeoutSeconds: 30, reactivatePath: xamlPath);
+            Assert.True(status.GetProperty("designerLoaded").GetBoolean(), status.ToString());
+            Assert.Equal("LibreWPF", status.GetProperty("backend").GetString());
+
+            JsonElement selected = default;
+            await OpenDevelopAppFixture.PollUntilAsync(async () =>
+            {
+                selected = await _app.InvokeAsync("od.wpf-designer.select", "PrimaryButton");
+                if (selected.GetProperty("success").GetBoolean())
+                    return true;
+                await _app.InvokeAsync("od.open-file", xamlPath);
+                return false;
+            }, TimeSpan.FromSeconds(15), initialDelayMs: 50, maxDelayMs: 250);
+            Assert.True(selected.GetProperty("success").GetBoolean(), selected.ToString());
+
+            var edited = await WaitForPropertiesPadEditAsync("Content", "Changed through Properties", timeoutSeconds: 10);
+            Assert.True(edited.GetProperty("success").GetBoolean(), edited.ToString());
+            Assert.Equal("Changed through Properties", edited.GetProperty("after").GetString());
+
+            var saved = await _app.InvokeAsync("od.file.save", xamlPath);
+            Assert.True(saved.GetProperty("success").GetBoolean(), saved.ToString());
+            Assert.False(saved.GetProperty("isDirty").GetBoolean());
+
+            var savedXaml = await File.ReadAllTextAsync(xamlPath);
+            Assert.Equal(originalXaml.Replace("Content=\"Button\"", "Content=\"Changed through Properties\""), savedXaml);
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(xamlPath, originalXaml);
+        }
+    }
+
+    [Fact] // WpfSampleSolutionPath is the LibreWPF sample off Windows.
     [Trait("DesignerBackend", "Microsoft")]
     public async Task SelectControl_EditingContentInPropertiesPad_UpdatesAndSavesXaml()
     {
@@ -2408,8 +2517,10 @@ public sealed class AddInTests : IAsyncDisposable
             Assert.True(saved.GetProperty("success").GetBoolean(), saved.ToString());
             Assert.False(saved.GetProperty("isDirty").GetBoolean());
 
+            // Saved byte-for-byte except the one edited value: the child host patches the parsed
+            // text instead of regenerating the document (MinimalXamlTextPatcher).
             var savedXaml = await File.ReadAllTextAsync(xamlPath);
-            Assert.Contains("Content=\"Changed through Properties\"", savedXaml);
+            Assert.Equal(originalXaml.Replace("Content=\"Button\"", "Content=\"Changed through Properties\""), savedXaml);
         }
         finally
         {
@@ -2419,7 +2530,7 @@ public sealed class AddInTests : IAsyncDisposable
         }
     }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
+    [Fact] // WpfSampleSolutionPath is the LibreWPF sample off Windows.
     [Trait("DesignerBackend", "Microsoft")]
     public async Task DragToolboxItem_OntoDesignSurface_InsertsAndPersistsControl()
     {
@@ -2731,8 +2842,7 @@ public sealed class AddInTests : IAsyncDisposable
         }
     }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
-    [Trait("DesignerBackend", "Microsoft")]
+    [Fact] // FormsDesignSolutionPath is the LibreWinForms sample off Windows.
     public async Task DragToolboxItem_OntoWinFormsDesignSurface_AddsControlToForm()
     {
         // Covers the THIRD drag-drop target for the shared WPF-hosted toolbox: an out-of-process
@@ -2749,12 +2859,18 @@ public sealed class AddInTests : IAsyncDisposable
 
         try
         {
-            var openSolutionResult = await _app.ReopenSolutionAsync(_app.WinFormsSampleSolutionPath);
+            var openSolutionResult = await _app.ReopenSolutionAsync(_app.FormsDesignSolutionPath);
             Assert.True(openSolutionResult.GetProperty("success").GetBoolean());
             var openFileResult = await _app.InvokeAsync("od.open-file", formCodePath.Replace(".Designer.cs", ".cs"));
             Assert.True(openFileResult.GetProperty("opened").GetBoolean());
 
-            var status = await _app.InvokeAsync("od.forms-designer.status");
+            JsonElement status = default;
+            // The design view loads asynchronously after the file opens (the host process and a
+            // first render); read the status only once it reports loaded.
+            await OpenDevelopAppFixture.PollUntilAsync(async () => {
+                status = await _app.InvokeAsync("od.forms-designer.status");
+                return status.GetProperty("designerLoaded").GetBoolean();
+            }, TimeSpan.FromSeconds(60), initialDelayMs: 100, maxDelayMs: 1000);
             Assert.True(status.GetProperty("designerLoaded").GetBoolean(), status.ToString());
             Assert.False(status.GetProperty("usesCodeDomLoader").GetBoolean(), status.ToString());
             AssertDesignerBackend(status, "OD_FORMS_RUNTIME", "WinForms", "LibreWinForms");
@@ -2856,9 +2972,10 @@ public sealed class AddInTests : IAsyncDisposable
                 "Expected the dropped NumericUpDown to have a Size assignment in the generated designer code.\n" + savedFormCode);
             Assert.Equal(120, int.Parse(sizeMatch.Groups[1].Value));
 			// Microsoft WinForms' real NumericUpDown defaults to 23px high; LibreWinForms'
-			// portable implementation is 20px. This Microsoft-only matrix must assert the
-			// native control's actual default rather than silently normalising it to Libre.
-			Assert.Equal(23, int.Parse(sizeMatch.Groups[2].Value));
+			// portable implementation is 20px. Assert the actual default of whichever backend
+			// designed the form rather than normalising one to the other.
+			var libreBackend = status.GetProperty("backend").GetString() == "LibreWinForms";
+			Assert.Equal(libreBackend ? 20 : 23, int.Parse(sizeMatch.Groups[2].Value));
 
             // Selecting a WinForms toolbox row without dragging must not arm a persistent creation
             // tool. The shared toolbox used to leave IToolboxService.SelectedToolboxItem set, so
@@ -2957,8 +3074,7 @@ public sealed class AddInTests : IAsyncDisposable
             savedPrimary, StringComparison.Ordinal);
     }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
-    [Trait("DesignerBackend", "Microsoft")]
+    [Fact] // FormsDesignSolutionPath is the LibreWinForms sample off Windows.
     public async Task WinFormsDesigner_DocumentOutline_ShowsControlTreeAndSelects()
     {
         // The Document Outline pad is the shared control (ICSharpCode.SharpDevelop.Widgets.
@@ -2973,7 +3089,7 @@ public sealed class AddInTests : IAsyncDisposable
         // test) opens the pad to see it.
         var formCodePath = Path.Combine(Path.GetDirectoryName(_app.WinFormsSampleSolutionPath)!, "Form1.cs");
 
-        var openSolutionResult = await _app.ReopenSolutionAsync(_app.WinFormsSampleSolutionPath);
+        var openSolutionResult = await _app.ReopenSolutionAsync(_app.FormsDesignSolutionPath);
         Assert.True(openSolutionResult.GetProperty("success").GetBoolean());
         var openFileResult = await _app.InvokeAsync("od.open-file", formCodePath);
         Assert.True(openFileResult.GetProperty("opened").GetBoolean());
@@ -2992,7 +3108,11 @@ public sealed class AddInTests : IAsyncDisposable
 
         var shownPad = await _app.InvokeAsync("od.show-pad", "ICSharpCode.SharpDevelop.Gui.OutlinePad");
         Assert.True(shownPad.GetProperty("found").GetBoolean(), shownPad.ToString());
-        outline = await _app.InvokeAsync("od.forms-designer.outline-status");
+        // The control is mounted before the child has reported its tree: wait for the root.
+        await OpenDevelopAppFixture.PollUntilAsync(async () => {
+            outline = await _app.InvokeAsync("od.forms-designer.outline-status");
+            return outline.TryGetProperty("root", out var root) && root.ValueKind == JsonValueKind.String;
+        }, TimeSpan.FromSeconds(30), initialDelayMs: 100, maxDelayMs: 500);
 
         // The tree is the child-reported control hierarchy: Form1 (root) with its children.
         Assert.Equal("Form1", outline.GetProperty("root").GetString());
@@ -3053,8 +3173,7 @@ public sealed class AddInTests : IAsyncDisposable
         await _app.InvokeAsync("od.close-all-document-views");
     }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
-    [Trait("DesignerBackend", "Microsoft")]
+    [Fact] // FormsDesignSolutionPath is the LibreWinForms sample off Windows.
     public async Task WinFormsDesigner_DoubleClickEventRow_CreatesAndBindsHandler()
     {
         // VS behavior: double-clicking a row in the Properties pad's Events view creates the
@@ -3068,7 +3187,7 @@ public sealed class AddInTests : IAsyncDisposable
         var originalDesigner = await File.ReadAllTextAsync(designerPath);
 
         try {
-            await _app.ReopenSolutionAsync(_app.WinFormsSampleSolutionPath);
+            await _app.ReopenSolutionAsync(_app.FormsDesignSolutionPath);
             await _app.InvokeAsync("od.open-file", formCodePath);
 
             JsonElement status = default;
@@ -3184,8 +3303,7 @@ public sealed class AddInTests : IAsyncDisposable
     }
 }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
-    [Trait("DesignerBackend", "Microsoft")]
+    [Fact] // FormsDesignSolutionPath is the LibreWinForms sample off Windows.
     public async Task WinFormsDesigner_ResizeDrag_SelectionAndHandleTrackRenderedFrame()
     {
         // Resize the root form by dragging its bottom-right handle, then assert the invariant
@@ -3200,7 +3318,7 @@ public sealed class AddInTests : IAsyncDisposable
         var originalDesigner = await File.ReadAllTextAsync(designerPath);
 
         try {
-            await _app.ReopenSolutionAsync(_app.WinFormsSampleSolutionPath);
+            await _app.ReopenSolutionAsync(_app.FormsDesignSolutionPath);
             await _app.InvokeAsync("od.open-file", formCodePath);
 
             JsonElement status = default;
@@ -3236,6 +3354,11 @@ public sealed class AddInTests : IAsyncDisposable
                     label + ": resize handle not at element bottom-right.\nelement=" + e + "\nhandle=(" + hx + "," + hy + ")\n" + g);
             }
 
+            // Zoom out first: a 100% form taller than a small editor tab puts its resize handle below
+            // the visible viewport, where a press lands on whatever is underneath instead. A fixed
+            // zoom, not Fit - Fit rescales the grown form back into the same box, so the frame would
+            // never measurably grow on screen.
+            Assert.True((await _app.InvokeAsync("od.forms-designer.view", "0.25")).GetProperty("success").GetBoolean());
             var before = await _app.InvokeAsync("od.forms-designer.surface-geometry");
             Assert.True(before.GetProperty("available").GetBoolean(), before.ToString());
             AssertConsistent(before, "before");
@@ -3318,9 +3441,12 @@ public sealed class AddInTests : IAsyncDisposable
             // frame bitmap may include, so this is an identity/gross-mismatch check (catching a
             // resize that landed on the wrong control entirely), not a pixel-exact one - the
             // exact-delta check above already covers the precise rendered-size assertion.
-            Assert.True(Math.Abs(persistedWidth - afterFrame.w) < 40,
-                $"Form1's persisted ClientSize width ({persistedWidth}) should roughly match the rendered post-drag width ({afterFrame.w}).");
-            Assert.True(Math.Abs(persistedHeight - afterFrame.h) < 40,
+            // The frame is measured on screen at the zoom set above; the persisted size is in design
+            // units.
+            const double viewZoom = 0.25;
+            Assert.True(Math.Abs(persistedWidth - afterFrame.w / viewZoom) < 40,
+                $"Form1's persisted ClientSize width ({persistedWidth}) should roughly match the rendered post-drag width ({afterFrame.w / viewZoom}).");
+            Assert.True(Math.Abs(persistedHeight - afterFrame.h / viewZoom) < 40,
                 $"Form1's persisted ClientSize height ({persistedHeight}) should roughly match the rendered post-drag height ({afterFrame.h}).");
         } finally {
             await File.WriteAllTextAsync(formCodePath, originalForm);
@@ -3328,8 +3454,7 @@ public sealed class AddInTests : IAsyncDisposable
         }
     }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
-    [Trait("DesignerBackend", "Microsoft")]
+    [Fact] // FormsDesignSolutionPath is the LibreWinForms sample off Windows.
     public async Task WinFormsDesigner_MultiSelectAlignNudgeUndoRedo_LandAsDesignerEdits()
     {
         // The out-of-process WinForms designer now exposes the same editing surface as the
@@ -3342,7 +3467,7 @@ public sealed class AddInTests : IAsyncDisposable
         var originalDesigner = await File.ReadAllTextAsync(designerPath);
 
         try {
-            await _app.ReopenSolutionAsync(_app.WinFormsSampleSolutionPath);
+            await _app.ReopenSolutionAsync(_app.FormsDesignSolutionPath);
             await _app.InvokeAsync("od.open-file", formCodePath);
 
             JsonElement status = default;
@@ -3449,8 +3574,7 @@ public sealed class AddInTests : IAsyncDisposable
         }
     }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
-    [Trait("DesignerBackend", "Microsoft")]
+    [Fact] // FormsDesignSolutionPath is the LibreWinForms sample off Windows.
     public async Task WinFormsDesigner_PadViewModeAndViewSwitching_RoundTrip()
     {
         // The WinForms designer's shared pad now switches Properties/Events views through the
@@ -3459,7 +3583,7 @@ public sealed class AddInTests : IAsyncDisposable
         // Form1.Load already, so the Events view must surface it with its handler.
         var formCodePath = Path.Combine(Path.GetDirectoryName(_app.WinFormsSampleSolutionPath)!, "Form1.cs");
 
-        await _app.ReopenSolutionAsync(_app.WinFormsSampleSolutionPath);
+        await _app.ReopenSolutionAsync(_app.FormsDesignSolutionPath);
         await _app.InvokeAsync("od.open-file", formCodePath);
 
         JsonElement status = default;
@@ -3501,7 +3625,7 @@ public sealed class AddInTests : IAsyncDisposable
         Assert.True(toolbox.GetProperty("centerX").GetDouble() > 0, toolbox.ToString());
     }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
+    [Fact] // WpfSampleSolutionPath is the LibreWPF sample off Windows.
     [Trait("DesignerBackend", "Microsoft")]
     public async Task WpfDesigner_DeleteAndViewSwitching_AndUnsupportedSurfaceReports()
     {
@@ -3582,7 +3706,7 @@ public sealed class AddInTests : IAsyncDisposable
         // its TextDocument as a VS ITextBuffer in the document service container, so
         // editor.GetService<ITextBuffer>() resolves a live wrapper over the exact same document.
         // Verified through the DevFlow action that reads it out of the running IDE.
-        var openedSolution = await _app.ReopenSolutionAsync(_app.WinFormsSampleSolutionPath);
+        var openedSolution = await _app.ReopenSolutionAsync(_app.FormsDesignSolutionPath);
         Assert.True(openedSolution.GetProperty("success").GetBoolean(), openedSolution.ToString());
         // Program.cs is a plain .cs in the WinForms sample - not a designable form, so the
         // AvalonEdit text editor (not the Forms designer) hosts it.
@@ -3784,7 +3908,7 @@ public sealed class AddInTests : IAsyncDisposable
             $"PrimaryButton's persisted Height ({persistedHeight}) should roughly match the rendered post-drag height ({afterHeight}).");
     }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
+    [Fact] // WpfSampleSolutionPath is the LibreWPF sample off Windows.
     [Trait("DesignerBackend", "Microsoft")]
     public async Task WpfDesigner_ResizeDrag_SelectionAndHandleTrackRenderedElement()
     {
@@ -3962,7 +4086,7 @@ public sealed class AddInTests : IAsyncDisposable
         return null;
     }
 
-    [Fact(Skip = "The Microsoft designer backends are Windows-only; see MicrosoftDesignerBackendsAvailable.", SkipUnless = nameof(MicrosoftDesignerBackendsAvailable))]
+    [Fact] // WpfSampleSolutionPath is the LibreWPF sample off Windows.
     [Trait("DesignerBackend", "Microsoft")]
     public async Task SelectControlOnSamplePane_ShowsSelectionInPropertiesPad()
     {
@@ -4989,7 +5113,9 @@ EndGlobal
         if (!afterClick.GetProperty("fileName").GetString()!.EndsWith("DebugTestApp.Program.cs", StringComparison.Ordinal))
             Assert.Fail($"click={click}; afterClick={afterClick};");
         Assert.EndsWith("DebugTestApp.Program.cs", afterClick.GetProperty("fileName").GetString());
-        Assert.Equal(17, afterClick.GetProperty("caretLine").GetInt32());
+        // ComputeGreeting's declaration in the decompiled type. It moved from 17 to 21 when the
+        // fixture's Main gained four locals for the debug visualizer tests.
+        Assert.Equal(21, afterClick.GetProperty("caretLine").GetInt32());
 
         // (6) Multi-select decompilation: several Assemblies-tree nodes selected together must
         // decompile into ONE combined document, not just whichever was selected last. This was, at
@@ -5237,6 +5363,81 @@ EndGlobal
         }, TimeSpan.FromSeconds(30));
 
         Assert.True(rendered, $"Expected remote language-service declaration bookmarks in the Icon Bar, got: {snapshot}");
+    }
+
+    /// <summary>
+    /// Each XAML runtime has its own language server and a file reaches no other: Microsoft WPF
+    /// (wpf-xaml-ls) and LibreWPF (librewpf-xaml-ls) although both are WPF markup; Microsoft WinUI
+    /// (winui-xaml-ls), ProGPU WinUI (progpu-winui-xaml-ls) and Uno (uno-xaml-ls) although all
+    /// three are WinUI markup. Before the servers were split, every page was served by one server as
+    /// WPF - a WinUI or Uno page completed System.Windows.Controls.Grid - and a ProGPU project was
+    /// even taken for Uno. The same "&lt;Grid" in each sample must resolve to that runtime's own
+    /// Grid type, checked twice: the second time after the Tier-2 prewarm had its chance to replace
+    /// Tier 1. (MAUI, an out-of-tree dialect, is covered by the MAUI addin's own journey.)
+    /// </summary>
+    [Fact]
+    public async Task XamlLanguageService_EachRuntime_UsesItsOwnServerAndControls()
+    {
+        var samples = Path.GetDirectoryName(Path.GetDirectoryName(_app.LibreWpfSampleSolutionPath))!;
+        var cases = new (string Runtime, string Solution, string Page, string Server, string ExpectedGrid)[]
+        {
+            ("LibreWPF", _app.LibreWpfSampleSolutionPath, "MainWindow.xaml", "librewpf-xaml-ls.dll", "System.Windows.Controls.Grid"),
+            ("Microsoft WPF", _app.MicrosoftWpfSampleSolutionPath, "MainWindow.xaml", "wpf-xaml-ls.dll", "System.Windows.Controls.Grid"),
+            ("Uno", _app.UnoXamlSampleSolutionPath, "MainPage.xaml", "uno-xaml-ls.dll", "Microsoft.UI.Xaml.Controls.Grid"),
+            ("ProGPU WinUI", _app.ProGpuWinUISampleSolutionPath, "MainPage.xaml", "progpu-winui-xaml-ls.dll", "Microsoft.UI.Xaml.Controls.Grid"),
+            ("Microsoft WinUI", _app.WinUISampleSolutionPath, "MainPage.xaml", "winui-xaml-ls.dll", "Microsoft.UI.Xaml.Controls.Grid"),
+            ("Microsoft WinUI (no package)", Path.Combine(samples, "MicrosoftWinUISample", "MicrosoftWinUISample.slnx"), "MainPage.xaml", "winui-xaml-ls.dll", "Microsoft.UI.Xaml.Controls.Grid"),
+        };
+
+        foreach (var (runtime, solution, page, server, expectedGrid) in cases)
+        {
+            var pagePath = Path.Combine(Path.GetDirectoryName(solution)!, page);
+            var (line, column) = PositionAfterOpeningAngle(await File.ReadAllTextAsync(pagePath), "<Grid");
+            Assert.True((await _app.ReopenSolutionAsync(solution)).GetProperty("success").GetBoolean(), runtime);
+            Assert.True((await _app.InvokeAsync("od.open-file", pagePath)).GetProperty("opened").GetBoolean(), runtime);
+
+            var routed = await _app.InvokeAsync("od.xaml.language-server", pagePath);
+            Assert.Equal(server, routed.GetProperty("server").GetString());
+            Assert.Equal(Path.GetDirectoryName(solution), routed.GetProperty("workspace").GetString());
+
+            async Task<string[]> GridCompletionTypes()
+            {
+                JsonElement result = default;
+                var answered = await OpenDevelopAppFixture.PollUntilAsync(async () =>
+                {
+                    result = await _app.InvokeAsync("od.completions", pagePath, line, column);
+                    return result.TryGetProperty("count", out var count) && count.GetInt32() > 0;
+                }, TimeSpan.FromSeconds(90));
+                Assert.True(answered, $"{runtime}: no completions at <Grid ({line},{column}) of {pagePath}: {result}");
+                return result.GetProperty("items").EnumerateArray()
+                    .Where(item => item.GetProperty("displayText").GetString() == "Grid")
+                    .Select(item => item.GetProperty("description").GetString() ?? "")
+                    .ToArray();
+            }
+
+            Assert.Equal(new[] { expectedGrid }, await GridCompletionTypes());
+            await Task.Delay(TimeSpan.FromSeconds(20));
+            Assert.Equal(new[] { expectedGrid }, await GridCompletionTypes());
+
+            // Closing the previous solution released its server: one per open workspace, not one
+            // per workspace ever opened (21 XAML servers once piled up across one run).
+            var held = await _app.InvokeAsync("od.lsp.server-count");
+            Assert.True(held.GetProperty("count").GetInt32() == 1, $"{runtime}: language servers held after switching solutions: {held}");
+        }
+    }
+
+    /// <summary>The 1-based line and column just after the "&lt;" of the first
+    /// <paramref name="tag"/> - where element-name completion is asked for.</summary>
+    static (int Line, int Column) PositionAfterOpeningAngle(string text, string tag)
+    {
+        var lines = text.Replace("\r\n", "\n").Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var at = lines[i].IndexOf(tag, StringComparison.Ordinal);
+            if (at >= 0)
+                return (i + 1, at + 2);
+        }
+        throw new InvalidOperationException(tag + " not found");
     }
 
     [Fact]

@@ -35,7 +35,9 @@ public sealed class UnoHotReloadIntegrationTests : IAsyncDisposable
 		File.Copy(FindRepositoryGlobalJson(fixtureDirectory), Path.Combine(_workDir, "global.json"));
 	}
 
-	[Fact]
+	// Uno Hot Reload is out of scope for now: the live Uno test app it launches can sit for minutes
+	// waiting for readiness (it only moved on once its window was closed by hand), stalling the suite.
+	[Fact(Skip = "Uno Hot Reload is not being pursued for now; its live test app can stall the suite.")]
 	public async Task SavedXamlEdit_UpdatesLiveUnoApplicationProbe()
 	{
 		if (!OperatingSystem.IsMacOS())

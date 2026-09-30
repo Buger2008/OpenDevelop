@@ -187,6 +187,48 @@ public sealed class MewUIDesignerTests : IAsyncLifetime, IAsyncDisposable
 	}
 
 	[Fact]
+	public async Task MewUIDesigner_RendersRealMewUIControlsWithLayoutBounds()
+	{
+		Assert.SkipUnless(OperatingSystem.IsMacOS(), "The MewUI host only wires up the macOS render backend so far.");
+		var openedProject = await app.ReopenSolutionAsync(projectPath);
+		Assert.True(openedProject.GetProperty("success").GetBoolean(), openedProject.ToString());
+		var opened = await app.InvokeAsync("od.open-file", designerPath);
+		Assert.True(opened.GetProperty("opened").GetBoolean(), opened.ToString());
+		var status = await WaitForDesignerAsync();
+		Assert.True(status.GetProperty("hasNativeFrame").GetBoolean(), "No MewUI frame: " + status);
+		// Every element of the fixture got a real arranged rect from MewUI's own layout.
+		Assert.Equal(status.GetProperty("elementCount").GetInt32(), status.GetProperty("nativeBoundsCount").GetInt32());
+
+		// Compare independent elements: bounds derived from one shared wrong source would still agree
+		// with themselves, but not order siblings left-to-right or nest a child inside its panel.
+		async Task<(double X, double Y, double W, double H)> Bounds(string id)
+		{
+			var b = await app.InvokeAsync("od.mewui-designer.query-element-screen-bounds", id);
+			Assert.True(b.GetProperty("success").GetBoolean(), id + ": " + b);
+			return (b.GetProperty("x").GetDouble(), b.GetProperty("y").GetDouble(), b.GetProperty("width").GetDouble(), b.GetProperty("height").GetDouble());
+		}
+		var row = await Bounds("toolRow"); var first = await Bounds("newButton"); var last = await Bounds("saveButton"); var heading = await Bounds("heading");
+		Assert.True(first.X + first.W <= last.X, $"Horizontal StackPanel children overlap: {first} vs {last}");
+		Assert.True(first.X >= row.X && first.Y >= row.Y && last.X + last.W <= row.X + row.W + 0.5, $"Buttons are not inside toolRow: {row} {first} {last}");
+		Assert.True(heading.Y + heading.H <= row.Y, $"heading is not above toolRow: {heading} vs {row}");
+		var diagnostics = status.GetProperty("diagnostics").EnumerateArray().Select(d => d.GetString()).ToArray();
+		Assert.DoesNotContain(diagnostics, d => d!.Contains("render failed") || d.Contains("Unknown MewUI control"));
+
+		// Attached properties are static Owner.SetX(Element, value) methods in MewUI, not instance
+		// properties: a known one applies silently, an unknown one is named in a diagnostic.
+		Assert.True((await app.InvokeAsync("od.mewui-designer.select", "heading")).GetProperty("success").GetBoolean());
+		var docked = await app.InvokeAsync("od.mewui-designer.set-property", "DockPanel.Dock", "Top");
+		Assert.True(docked.GetProperty("success").GetBoolean(), docked.ToString());
+		var bogus = await app.InvokeAsync("od.mewui-designer.set-property", "Grid.Bogus", "1");
+		Assert.True(bogus.GetProperty("success").GetBoolean(), bogus.ToString());
+		status = await app.InvokeAsync("od.mewui-designer.status");
+		diagnostics = status.GetProperty("diagnostics").EnumerateArray().Select(d => d.GetString()).ToArray();
+		Assert.DoesNotContain(diagnostics, d => d!.Contains("DockPanel.Dock"));
+		Assert.Contains(diagnostics, d => d!.Contains("Grid.Bogus"));
+		Assert.True(status.GetProperty("hasNativeFrame").GetBoolean(), status.ToString());
+	}
+
+	[Fact]
 	public async Task MewUIDesigner_DragToolboxItemOntoPreviewSurface_InsertsAndPersistsControl()
 	{
 		// Companion to WPF's/WinUI's/GTK's DragToolboxItem_On*_InsertsAndPersistsControl tests

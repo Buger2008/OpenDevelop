@@ -10,7 +10,6 @@ public sealed class FormsMenuEditingTests(OpenDevelopAppFixture app)
 	[Fact]
 	public async Task ComponentTray_ContainsStripLevelObjects_NotToolStripItems()
 	{
-		if (!OperatingSystem.IsWindows()) return;
 		await OpenFixture();
 		JsonElement tray = default;
 		Assert.True(await OpenDevelopAppFixture.PollUntilAsync(async () => {
@@ -34,7 +33,9 @@ public sealed class FormsMenuEditingTests(OpenDevelopAppFixture app)
     [InlineData("fileItem", "menuItem")]
     public async Task PopupItem_Click_Edit_Cancel_Commit_Undo(string owner, string item)
     {
-        if (!OperatingSystem.IsWindows()) return;
+		// LibreWinForms attaches ToolStripMenuItemDesigner, but selecting a menu item does not expand
+		// its dropdown yet (no popup, no "Type Here"/insertion node), so skip off Windows for now.
+		Assert.SkipUnless(OperatingSystem.IsWindows(), "LibreWinForms: selecting a menu item does not expand its dropdown yet.");
         await OpenFixture();
         Assert.True((await app.InvokeAsync("od.forms-designer.select", owner)).GetProperty("success").GetBoolean());
         await ClickItem(item);
@@ -59,7 +60,9 @@ public sealed class FormsMenuEditingTests(OpenDevelopAppFixture app)
     [InlineData("fileItem")]
     public async Task PopupTypeHere_Click_CreateItem_AndUndoRemovesIt(string owner)
     {
-        if (!OperatingSystem.IsWindows()) return;
+		// LibreWinForms attaches ToolStripMenuItemDesigner, but selecting a menu item does not expand
+		// its dropdown yet (no popup, no "Type Here"/insertion node), so skip off Windows for now.
+		Assert.SkipUnless(OperatingSystem.IsWindows(), "LibreWinForms: selecting a menu item does not expand its dropdown yet.");
         await OpenFixture();
         var beforeNames = (await app.InvokeAsync("od.forms-designer.status")).GetProperty("controlNames")
             .EnumerateArray().Select(name => name.GetString()).ToHashSet(StringComparer.Ordinal);
@@ -98,7 +101,9 @@ public sealed class FormsMenuEditingTests(OpenDevelopAppFixture app)
     [Fact]
     public async Task StatusStrip_InsertionNode_Click_AddsItem_AndUndoRemovesIt()
     {
-        if (!OperatingSystem.IsWindows()) return;
+		// LibreWinForms attaches ToolStripMenuItemDesigner, but selecting a menu item does not expand
+		// its dropdown yet (no popup, no "Type Here"/insertion node), so skip off Windows for now.
+		Assert.SkipUnless(OperatingSystem.IsWindows(), "LibreWinForms: selecting a menu item does not expand its dropdown yet.");
         await OpenFixture();
         await app.InvokeAsync("od.forms-designer.select", "statusStrip");
         var state = await Editor();
@@ -162,7 +167,12 @@ public sealed class FormsMenuEditingTests(OpenDevelopAppFixture app)
     {
         // Never edit the user's Jexus solution or the tracked sample. Keep a unique temporary
         // fixture for failure inspection; assembly fixture shutdown releases all its handles.
-        var directory = Directory.CreateTempSubdirectory("od-menu-edit-").FullName;
+        // Off Windows the fixture sits in the LibreWinForms sample's own obj/ (git-ignored, outside
+        // its compile globs) so it inherits the same SDK, package-version and feed configuration
+        // the real sample restores with; a system temp folder has none of them.
+        var directory = OperatingSystem.IsWindows()
+            ? Directory.CreateTempSubdirectory("od-menu-edit-").FullName
+            : Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(app.LibreWinFormsSampleSolutionPath)!, "obj", "od-menu-edit-" + Guid.NewGuid().ToString("N"))).FullName;
         var sample = Path.GetDirectoryName(app.WinFormsSampleSolutionPath)!;
         foreach (var file in Directory.GetFiles(sample))
             File.Copy(file, Path.Combine(directory, Path.GetFileName(file)));
@@ -194,13 +204,27 @@ public sealed class FormsMenuEditingTests(OpenDevelopAppFixture app)
                 }
             }}
             """);
+        // Off Windows the form is designed by LibreWinForms: swap the Microsoft project for the
+        // LibreWinForms sample's, pointed at the local copies of the same Form1 sources.
+        var projectName = "WinFormsSample";
+        if (!OperatingSystem.IsWindows()) {
+            projectName = "LibreWinFormsSample";
+            foreach (var microsoftFile in new[] { "WinFormsSample.csproj", "WinFormsSample.sln", "WinFormsSample.slnx" })
+                File.Delete(Path.Combine(directory, microsoftFile));
+            var libre = Path.GetDirectoryName(app.LibreWinFormsSampleSolutionPath)!;
+            var project = await File.ReadAllTextAsync(Path.Combine(libre, "LibreWinFormsSample.csproj"));
+            // The copied sources are local now; the SDK's default globbing picks them up.
+            project = System.Text.RegularExpressions.Regex.Replace(project, @"\s*<Compile Include=""\.\.\\WinFormsSample\\[^""]+"" Link=""[^""]+"" />", "");
+            await File.WriteAllTextAsync(Path.Combine(directory, "LibreWinFormsSample.csproj"), project);
+            File.Copy(app.LibreWinFormsSampleSolutionPath, Path.Combine(directory, "LibreWinFormsSample.slnx"));
+        }
         using var restore = Process.Start(new ProcessStartInfo("dotnet") {
-            ArgumentList = { "restore", Path.Combine(directory, "WinFormsSample.csproj"), "--verbosity", "quiet" },
+            ArgumentList = { "restore", Path.Combine(directory, projectName + ".csproj"), "--verbosity", "quiet" },
             UseShellExecute = false, CreateNoWindow = true
         })!;
         await restore.WaitForExitAsync();
         Assert.Equal(0, restore.ExitCode);
-        Assert.True((await app.ReopenSolutionAsync(Path.Combine(directory, "WinFormsSample.sln"))).GetProperty("success").GetBoolean());
+        Assert.True((await app.ReopenSolutionAsync(Path.Combine(directory, OperatingSystem.IsWindows() ? "WinFormsSample.sln" : "LibreWinFormsSample.slnx"))).GetProperty("success").GetBoolean());
         await app.InvokeAsync("od.open-file", Path.Combine(directory, "Form1.cs"));
         JsonElement status = default;
         Assert.True(await OpenDevelopAppFixture.PollUntilAsync(async () => {

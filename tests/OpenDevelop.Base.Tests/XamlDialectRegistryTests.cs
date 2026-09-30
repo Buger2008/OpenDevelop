@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -101,6 +101,40 @@ namespace OpenDevelop.Tests
 		}
 
 		[Fact]
+		public void Registered_Dialect_Supplies_The_Source_Editor_Toolbox()
+		{
+			string file = WriteFile("MainPage.xaml", "<ContentPage />");
+			var toolbox = new object();
+			XamlDialectRegistry.Register(new XamlDialectRegistration(
+				"Maui", name => string.Equals(Path.GetFileName(name), "MainPage.xaml", StringComparison.Ordinal)) {
+				ToolsContent = () => toolbox
+			});
+
+			try {
+				Assert.Same(toolbox, XamlDialectRegistry.GetToolsContent(file));
+				// Unclaimed files keep the built-in choice.
+				Assert.Null(XamlDialectRegistry.GetToolsContent(WriteFile("Other.xaml", "<Window />")));
+			} finally {
+				XamlDialectRegistry.Unregister("Maui");
+			}
+		}
+
+		[Fact]
+		public void A_Throwing_Toolbox_Provider_Leaves_The_Built_In_Choice()
+		{
+			string file = WriteFile("MainPage.xaml", "<ContentPage />");
+			XamlDialectRegistry.Register(new XamlDialectRegistration("Maui", _ => true) {
+				ToolsContent = () => throw new InvalidOperationException("broken addin")
+			});
+
+			try {
+				Assert.Null(XamlDialectRegistry.GetToolsContent(file));
+			} finally {
+				XamlDialectRegistry.Unregister("Maui");
+			}
+		}
+
+		[Fact]
 		public void Non_Matching_File_Is_Not_Claimed()
 		{
 			string other = WriteFile("Other.xaml", "<ContentPage />");
@@ -147,6 +181,43 @@ namespace OpenDevelop.Tests
 				XamlDialectRegistry.Unregister("Broken");
 				XamlDialectRegistry.Unregister("Maui");
 			}
+		}
+
+		[Fact]
+		public void A_File_Is_Served_Only_By_Its_Own_Dialects_Server()
+		{
+			// Each runtime has its own server; a file goes to its own server and no other, and one
+			// nobody serves gets no server rather than a wrong one. (Out-of-tree dialects are keyed
+			// by their dialect; built-in runtimes are covered by the integration test.)
+			string maui = WriteFile("MainPage.xaml", "<ContentPage />");
+			string silent = WriteFile("Silent.xaml", "<Thing />");
+			string plain = WriteFile("Other.xaml", "<Grid />");
+			XamlDialectRegistry.Register(new XamlDialectRegistration(
+				"Maui", name => string.Equals(Path.GetFileName(name), "MainPage.xaml", StringComparison.Ordinal)));
+			XamlDialectRegistry.Register(new XamlDialectRegistration(
+				"Silent", name => string.Equals(Path.GetFileName(name), "Silent.xaml", StringComparison.Ordinal)));
+			var mauiServer = Path.Combine(tempDirectory, "maui-xaml-ls.dll");
+			var wpfServer = Path.Combine(tempDirectory, "wpf-xaml-ls.dll");
+			using var mauiRegistration = XamlLanguageServers.Register("Maui", mauiServer);
+			using var wpfRegistration = XamlLanguageServers.Register(XamlLanguageServers.MicrosoftWpf, wpfServer);
+
+			try {
+				var spec = XamlLanguageServers.GetLaunchSpec(maui);
+				Assert.NotNull(spec);
+				Assert.Equal(new[] { "exec", mauiServer, "--workspace", tempDirectory }, spec!.Arguments);
+				// Registered dialect without a server, and an unclaimed file: no server at all -
+				// never the WPF one registered alongside.
+				Assert.Null(XamlLanguageServers.GetLaunchSpec(silent));
+				Assert.Null(XamlLanguageServers.GetLaunchSpec(plain));
+				Assert.Null(XamlLanguageServers.GetLaunchSpec(""));
+			} finally {
+				XamlDialectRegistry.Unregister("Maui");
+				XamlDialectRegistry.Unregister("Silent");
+			}
+
+			// Disposing a registration removes that server again.
+			mauiRegistration.Dispose();
+			Assert.Null(XamlLanguageServers.GetServerAssembly("Maui"));
 		}
 
 		[Fact]

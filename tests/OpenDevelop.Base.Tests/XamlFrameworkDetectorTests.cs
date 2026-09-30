@@ -34,6 +34,10 @@ public sealed class XamlFrameworkDetectorTests
 	// project with another runtime's controls; the designer now reports the OS as unsupported
 	// instead. LibreWPF comes only from explicit evidence (LibreWPF.Sdk) in the project file.
 	[InlineData("<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><UseWPF>true</UseWPF></PropertyGroup></Project>", XamlFrameworkKind.Wpf, XamlRuntimeKind.MicrosoftWpf, XamlRuntimeKind.MicrosoftWpf)]
+	// ProGPU WinUI is its own runtime even though such a project references Uno.WinUI (for the WinUI
+	// XAML language model, ExcludeAssets="all"): detected as Uno, it was designed by the Uno host
+	// ("Rendered by Uno design host") and analysed by Uno's language server.
+	[InlineData("<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><UseProGpuWinUI>true</UseProGpuWinUI></PropertyGroup><ItemGroup><PackageReference Include=\"Uno.WinUI\" ExcludeAssets=\"all\" /></ItemGroup></Project>", XamlFrameworkKind.WinUI, XamlRuntimeKind.ProGpuWinUI, XamlRuntimeKind.ProGpuWinUI)]
 	[InlineData("<Project Sdk=\"Microsoft.NET.Sdk\" />", XamlFrameworkKind.Unknown, XamlRuntimeKind.Unknown, XamlRuntimeKind.Unknown)]
 	public void DetectProjectFile_UsesOrderedFrameworkEvidence(string projectXml, XamlFrameworkKind expected, XamlRuntimeKind expectedRuntimeOnWindows, XamlRuntimeKind expectedRuntimeElsewhere)
 	{

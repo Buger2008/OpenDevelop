@@ -75,6 +75,10 @@ public sealed class OpenDevelopAppFixture : IAsyncLifetime
     public string LibreWinFormsSampleSolutionPath => LocateSample(Path.Combine("src", "Samples", "LibreWinFormsSample", "LibreWinFormsSample.slnx"));
     public string MicrosoftWpfSampleSolutionPath => LocateMicrosoftWpfSampleSolution();
     public string WinFormsSampleSolutionPath => LocateWinFormsSampleSolution();
+    // The solution the WinForms designer tests design Form1 through: the Microsoft WinForms sample on
+    // Windows, elsewhere its LibreWinForms counterpart, which links the same Form1 sources (so every
+    // Form1.cs/Form1.Designer.cs path stays under WinFormsSampleSolutionPath's directory).
+    public string FormsDesignSolutionPath => OperatingSystem.IsWindows() ? WinFormsSampleSolutionPath : LibreWinFormsSampleSolutionPath;
     public string UnoXamlSampleSolutionPath => LocateUnoXamlSampleSolution();
     public string ProGpuWinUISampleSolutionPath => LocateProGpuWinUISampleSolution();
     public string WinUISampleSolutionPath => LocateWinUISampleSolution();

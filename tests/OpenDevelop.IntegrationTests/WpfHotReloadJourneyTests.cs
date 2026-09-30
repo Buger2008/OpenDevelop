@@ -39,7 +39,7 @@ public sealed class WpfHotReloadJourneyTests
 		var supported = await _app.InvokeAsync("od.hot-reload.status");
 		Assert.True(supported.ValueKind != JsonValueKind.Undefined, supported.ToString());
 
-		Assert.True((await _app.InvokeAsync("od.open-file", xaml)).GetProperty("opened").GetBoolean());
+		await OpenAsActiveDocumentAsync(xaml);
 
 		var originalXaml = await File.ReadAllTextAsync(xaml);
 		try {
@@ -111,7 +111,7 @@ public sealed class WpfHotReloadJourneyTests
 
 		var opened = await _app.ReopenSolutionAsync(solution);
 		Assert.True(opened.GetProperty("success").GetBoolean(), opened.ToString());
-		Assert.True((await _app.InvokeAsync("od.open-file", xaml)).GetProperty("opened").GetBoolean());
+		await OpenAsActiveDocumentAsync(xaml);
 
 		var originalXaml = await File.ReadAllTextAsync(xaml);
 		try {
@@ -138,8 +138,14 @@ public sealed class WpfHotReloadJourneyTests
 			var applied = await _app.InvokeAsync("od.hot-reload.apply-command");
 			Assert.True(applied.GetProperty("success").GetBoolean(), applied.ToString());
 
-			await WaitForAgentValueAsync(endpoint!, "PaneTitle.Text", "Dynamic resource applied",
-				TimeSpan.FromSeconds(30));
+			try {
+				await WaitForAgentValueAsync(endpoint!, "PaneTitle.Text", "Dynamic resource applied",
+					TimeSpan.FromSeconds(30));
+			} catch (Exception ex) when (ex is not OperationCanceledException) {
+				var log = await _app.InvokeAsync("od.output-text", "Hot Reload");
+				var view = await _app.InvokeAsync("od.active-view");
+				throw new Xunit.Sdk.XunitException($"{ex.Message}\nactive view: {view}\nHot Reload output:\n{log.GetProperty("text").GetString()}");
+			}
 
 			// The regression itself. apply-command returns {success:true} either way, because the
 			// XML fallback still updates the named properties it can reach; only the output text
@@ -160,26 +166,26 @@ public sealed class WpfHotReloadJourneyTests
 	}
 
 	/// <summary>
-	/// Both tests share one IDE instance, and the cleanup above returns before the application it
-	/// launched has exited. The next test's Hot Reload build then fails - the still-running process
-	/// holds its own output - and the workbench reports {"active":false} until the 90s timeout, so
-	/// the second test fails for a reason unrelated to what it asserts, and only when the two run
-	/// together. Waiting on the session state alone is not enough: that goes inactive as soon as
-	/// stop-command is acknowledged, well before the process is gone.
+	/// Both tests share one IDE instance, so the application one of them launched must be gone before
+	/// the next Hot Reload build, which otherwise fails on the output the still-running process holds.
+	/// <para>
+	/// Hot Reload launches it WITHOUT the debugger (ExecuteWithHotReload), like Visual Studio's Start
+	/// Without Debugging: the IDE keeps no handle to it, stop-command ends only the session, and
+	/// od.stop-project only knows what od.run-project started. Nothing in the IDE ends it, so waiting
+	/// for it to exit only ever timed out - a minute per test with its window left on screen, which
+	/// looked like the suite had hung. The test launched it, so the test ends it.
+	/// </para>
 	/// </summary>
 	async Task WaitForSessionInactiveAsync()
 	{
-		var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
+		var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
 		while (DateTime.UtcNow < deadline) {
 			var session = await _app.InvokeAsync("od.hot-reload.session");
-			var inactive = !session.TryGetProperty("active", out var active) || !active.GetBoolean();
-			if (inactive && FixtureProcesses().Length == 0)
-				return;
-			await Task.Delay(500);
+			if (!session.TryGetProperty("active", out var active) || !active.GetBoolean())
+				break;
+			await Task.Delay(250);
 		}
 
-		// The build that follows would fail on a locked file with a message that names neither this
-		// test nor the process holding it, so end the stalemate here where the cause is obvious.
 		foreach (var process in FixtureProcesses()) {
 			try {
 				process.Kill(entireProcessTree: true);
@@ -188,6 +194,28 @@ public sealed class WpfHotReloadJourneyTests
 				// Already gone between the enumeration and the kill; nothing to clean up.
 			}
 		}
+	}
+
+	/// <summary>
+	/// Opens <paramref name="xaml"/> and waits until it really is the active document, which is
+	/// what apply-command targets. Reopening the solution restores the documents a previous test
+	/// left open (WpfDesignerAssemblyLockTests opens this sample's MainWindow.xaml) asynchronously,
+	/// after od.open-file has returned - so the restore can take the active view back, and the
+	/// apply then went to MainWindow.xaml ("[WPF] MainWindow.xaml: Applied") while the test waited
+	/// for SamplePane's title to change.
+	/// </summary>
+	async Task OpenAsActiveDocumentAsync(string xaml)
+	{
+		var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+		JsonElement view = default;
+		while (DateTime.UtcNow < deadline) {
+			Assert.True((await _app.InvokeAsync("od.open-file", xaml)).GetProperty("opened").GetBoolean());
+			await Task.Delay(500);
+			view = await _app.InvokeAsync("od.active-view");
+			if (view.TryGetProperty("fileName", out var name) && string.Equals(name.GetString(), xaml, StringComparison.Ordinal))
+				return;
+		}
+		Assert.Fail($"{xaml} never became the active document; active view: {view}");
 	}
 
 	static System.Diagnostics.Process[] FixtureProcesses() =>
